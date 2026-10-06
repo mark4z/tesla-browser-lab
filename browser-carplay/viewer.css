@@ -19,7 +19,7 @@ li { padding-left: 4px; margin-bottom: 11px; }
 output { color: #d2e5ff; overflow-wrap: anywhere; font-weight: 650; }
 .warning { color: #e8cba0; font-size: 13px; }
 form > label:not(.check) { display: block; margin-bottom: 6px; font-size: 14px; font-weight: 650; }
-input[type="text"], input[type="password"] { display: block; width: 100%; min-height: 46px; border: 1px solid #49607d; border-radius: 9px; padding: 10px 12px; background: #0b1420; color: #edf3fc; font: inherit; font-size: 15px; }
+input[type="text"] { display: block; width: 100%; min-height: 46px; border: 1px solid #49607d; border-radius: 9px; padding: 10px 12px; background: #0b1420; color: #edf3fc; font: inherit; font-size: 15px; }
 small { display: block; color: #a6b7cd; font-size: 12px; margin: 5px 0 16px; }
 .check { display: flex; align-items: center; gap: 9px; font-size: 14px; cursor: pointer; min-height: 44px; }
 input[type="checkbox"] { min-width: 19px; width: 19px; height: 19px; accent-color: #a6c9ff; margin: 0; }
@@ -48,3 +48,7 @@ details { padding: 17px 0; }
 summary { cursor: pointer; color: #d1e1f5; min-height: 32px; }
 footer { border-top: 1px solid #25344a; padding: 20px 0 0; margin-top: 12px; }
 @media (max-width: 720px) { main { padding: 20px 16px; } .setup { grid-template-columns: 1fr; gap: 16px; padding: 22px; } .intro { margin-top: 28px; } .brand span { font-size: 12px; } #viewport { height: 52vh; min-height: 210px; } }
+
+.display-toolbar > .touch-control { flex: 0 1 auto; display: block; }
+#touch-status { display: block; font-size: 12px; color: #a6b7cd; }
+#indicator[data-state="requestingApproval"], #indicator[data-state="approvalPending"] { background: #ead2a4; }

@@ -25,11 +25,10 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
     hasPointerCapture(id) { return captured.has(id); }
     releasePointerCapture(id) { captured.delete(id); this.dispatch('lostpointercapture', { pointerId: id }); }
   }
-  const elements = Object.fromEntries(['connection', 'endpoint', 'token', 'parked', 'touch', 'connect', 'disconnect',
-    'video', 'viewport', 'placeholder', 'status', 'indicator', 'origin'].map(id => [id, new Element()]));
+  const elements = Object.fromEntries(['connection', 'ip', 'port', 'parked', 'touch', 'connect', 'disconnect',
+    'video', 'viewport', 'placeholder', 'status', 'indicator', 'origin', 'touch-status'].map(id => [id, new Element()]));
   elements.parked.checked = true;
   elements.touch.checked = true;
-  elements.token.value = 'restored-form-value';
   const document = Object.assign(new Events(), { visibilityState: 'visible', getElementById: id => elements[id] });
   const sockets = [], decoders = [], raf = new Map();
   let rafId = 0;
@@ -64,7 +63,6 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
   assert.equal(sockets.length, 0, 'page load must not connect');
   assert.equal(elements.parked.checked, false, 'restored parked state is not fresh consent');
   assert.equal(elements.touch.checked, false);
-  assert.equal(elements.token.value, '');
   assert.equal(elements.connect.disabled, true);
   assert.equal(elements.origin.textContent, 'https://viewer.example');
   elements.connection.dispatch('submit');
@@ -72,17 +70,24 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
 
   elements.parked.checked = true;
   elements.parked.dispatch('change');
-  elements.endpoint.value = 'ws://192.168.1.20:8765/carplay';
-  elements.token.value = 'synthetic-ui-token';
+  elements.ip.value = 'ws://192.168.1.20:8765/carplay';
+  elements.port.value = '8765';
+  elements.connection.dispatch('submit');
+  assert.equal(sockets.length, 0, 'full endpoints cannot be supplied as the IP');
+  assert.match(elements.status.textContent, /only the private IPv4/);
+  elements.ip.value = '192.168.1.20';
+  elements.port.value = '8765';
   elements.connection.dispatch('submit');
   elements.connection.dispatch('submit');
   assert.equal(sockets.length, 1, 'repeated submit cannot duplicate connection');
-  assert.equal(elements.token.value, '');
-  assert.equal(elements.endpoint.disabled, true);
+  assert.equal(elements.ip.disabled, true);
   const socket = sockets[0];
   socket.open();
-  assert.deepEqual(socket.sent, [{ type: 'auth', token: 'synthetic-ui-token' }]);
-  socket.receive({ type: 'authenticated' });
+  assert.deepEqual(socket.sent, [{ type: 'requestApproval', version: 2 }]);
+  socket.receive({ type: 'approvalPending', version: 2 });
+  assert.match(elements.status.textContent, /Tap Accept/);
+  assert.equal(elements.touch.disabled, true);
+  socket.receive({ type: 'authenticated', version: 2 });
   socket.receive({ type: 'config', streamId: 1, codec: 'avc1.64001f', width: 1920, height: 1080 });
   await Promise.resolve();
   const superseded = decoders[0].emit();
@@ -99,6 +104,13 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
 
   elements.touch.checked = true;
   elements.touch.dispatch('change');
+  assert.deepEqual(socket.sent.at(-1), { type: 'setTouchOwnership', enabled: true, streamId: 1, requestId: 1 });
+  elements.video.dispatch('pointerdown', pointer(100));
+  assert.equal(socket.sent.some(m => m.type === 'touch'), false, 'checkbox alone does not grant touch ownership');
+  assert.equal(elements.video.classes.has('touch-enabled'), false);
+  assert.match(elements['touch-status'].textContent, /Waiting for Android/);
+  socket.receive({ type: 'touchOwnership', enabled: true, streamId: 1, requestId: 1 });
+  assert.equal(elements.video.classes.has('touch-enabled'), true);
   elements.video.dispatch('pointerdown', pointer(100, 500, 100));
   assert.equal(socket.sent.some(m => m.type === 'touch'), false, 'black bars are not touch targets');
   elements.video.dispatch('pointerdown', pointer(100, 250, 500));
@@ -131,7 +143,34 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
   window.dispatch('blur');
   assert.deepEqual(socket.sent.at(-1).contacts, []);
   assert.equal(captured.size, 0);
-  const cancelled = decoders[0].emit();
+  elements.video.dispatch('pointerdown', pointer(450));
+  assert.equal(captured.size, 1);
+  elements.touch.checked = false;
+  elements.touch.dispatch('change');
+  assert.equal(captured.size, 0);
+  assert.deepEqual(socket.sent.at(-2), { type: 'touch', streamId: 1, contacts: [] });
+  assert.deepEqual(socket.sent.at(-1), { type: 'setTouchOwnership', enabled: false, streamId: 1, requestId: 2 });
+  assert.equal(elements.video.classes.has('touch-enabled'), false);
+  socket.receive({ type: 'touchOwnership', enabled: false, streamId: 1, requestId: 2 });
+  assert.equal(elements['touch-status'].textContent, 'Touch control off');
+  elements.touch.checked = true;
+  elements.touch.dispatch('change');
+  socket.receive({ type: 'touchOwnership', enabled: true, streamId: 1, requestId: 1 });
+  assert.equal(elements.video.classes.has('touch-enabled'), false, 'old acknowledgment cannot enable new opt-in');
+  socket.receive({ type: 'touchOwnership', enabled: true, streamId: 1, requestId: 3 });
+  assert.equal(elements.video.classes.has('touch-enabled'), true);
+
+  socket.receive({ type: 'config', streamId: 2, codec: 'avc1.64001f', width: 1920, height: 1080 });
+  assert.equal(elements.touch.checked, false);
+  assert.equal(elements.touch.disabled, true);
+  assert.equal(elements.video.classes.has('touch-enabled'), false);
+  socket.receive({ type: 'touchOwnership', enabled: true, streamId: 1, requestId: 3 });
+  await Promise.resolve();
+  decoders.at(-1).emit();
+  paint();
+  assert.equal(elements.touch.checked, false, 'new stream requires another explicit touch opt-in');
+  assert.equal(elements.video.classes.has('touch-enabled'), false);
+  const cancelled = decoders.at(-1).emit();
   document.visibilityState = 'hidden';
   document.dispatch('visibilitychange');
   assert.equal(cancelled.closes, 1, 'pending frame is closed on hide');
@@ -140,7 +179,6 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
   assert.equal(elements.parked.checked, false);
   assert.equal(elements.touch.checked, false);
   assert.equal(elements.touch.disabled, true);
-  assert.equal(elements.token.value, '');
   document.visibilityState = 'visible';
   document.dispatch('visibilitychange');
   window.dispatch('pageshow', { persisted: true });
@@ -148,11 +186,28 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
 
   elements.parked.checked = true;
   elements.parked.dispatch('change');
-  elements.token.value = 'synthetic-reconnect-token';
   elements.connection.dispatch('submit');
   assert.equal(sockets.length, 2);
   assert.equal(elements.touch.checked, false);
+  sockets[1].open();
+  sockets[1].receive({ type: 'approvalPending', version: 2 });
   elements.disconnect.dispatch('click');
   elements.disconnect.dispatch('click');
   assert.equal(sockets[1].readyState, 3);
+  assert.equal(elements.touch.disabled, true);
+  assert.equal(sockets.length, 2, 'cancelling pending approval must never reconnect');
+
+  elements.connection.dispatch('submit');
+  const rejected = sockets[2];
+  rejected.open();
+  rejected.receive({ type: 'approvalPending', version: 2 });
+  rejected.receive({ type: 'error', code: 'approvalRejected', version: 2 });
+  assert.equal(rejected.readyState, 3);
+  assert.match(elements.status.textContent, /rejected on Android/);
+  assert.equal(elements.ip.disabled, false);
+  assert.equal(elements.port.disabled, false);
+  assert.equal(elements.connect.disabled, false);
+  assert.equal(elements.touch.checked, false);
+  assert.equal(elements.touch.disabled, true);
+  assert.equal(sockets.length, 3);
 });

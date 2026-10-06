@@ -2,22 +2,20 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Contacts, fitRect, mapPointer, MAX_CONTACTS, MAX_VIDEO_PACKET_BYTES, parseConfig, parseEndpoint, parseVideoPacket } from '../core.mjs';
 
-test('accepts only explicit RFC1918 IPv4, port and fixed bridge path', () => {
+test('constructs only RFC1918 IPv4 destinations with a bounded port and fixed path', () => {
   for (const host of ['10.0.0.1', '172.16.0.1', '172.31.255.254', '192.168.1.20']) {
-    assert.equal(parseEndpoint(` ws://${host}:8765/carplay `), `ws://${host}:8765/carplay`);
+    for (const port of ['1', '8765', '65535']) assert.equal(parseEndpoint(` ${host} `, ` ${port} `), `ws://${host}:${port}/carplay`);
   }
-  for (const endpoint of [
-    'ws://8.8.8.8:8765/carplay', 'ws://127.0.0.1:8765/carplay', 'ws://169.254.1.1:8765/carplay',
-    'ws://172.15.0.1:8765/carplay', 'ws://172.32.0.1:8765/carplay', 'ws://192.169.0.1:8765/carplay',
-    'ws://192.168.256.1:8765/carplay', 'ws://192.168.01.1:8765/carplay', 'ws://0xc0a80101:8765/carplay',
-    'ws://3232235777:8765/carplay', 'ws://192.168.1:8765/carplay', 'ws://bridge.local:8765/carplay',
-    'ws://[fd00::1]:8765/carplay', 'ws://192.168.1.1/carplay', 'ws://192.168.1.1:0/carplay',
-    'ws://192.168.1.1:65536/carplay', 'ws://192.168.1.1:08765/carplay', 'wss://192.168.1.1:8765/carplay',
-    'http://192.168.1.1:8765/carplay', 'ws://user:pass@192.168.1.1:8765/carplay',
-    'ws://192.168.1.1:8765/carplay?token=synthetic', 'ws://192.168.1.1:8765/carplay#secret',
-    'ws://192.168.1.1:8765/carplay/', 'ws://192.168.1.1:8765/other',
-    'ws://192.168.1.1:8765/../carplay', 'ws://192.168.1.1:8765/car\nplay',
-  ]) assert.throws(() => parseEndpoint(endpoint), endpoint);
+  for (const host of [
+    '8.8.8.8', '127.0.0.1', '169.254.1.1', '172.15.0.1', '172.32.0.1', '192.169.0.1',
+    '192.168.256.1', '192.168.01.1', '0xc0a80101', '3232235777', '192.168.1', 'bridge.local',
+    '[fd00::1]', 'ws://192.168.1.20', '192.168.1.20:8765', '192.168.1.20/carplay',
+    'user:pass@192.168.1.20', '192.168.1.20?token=synthetic', '192.168.1.20#secret',
+    '192.168.1.20/../carplay', '192.168.1.\n20', '', null, 3232235777,
+  ]) assert.throws(() => parseEndpoint(host, '8765'), String(host));
+  for (const port of ['0', '65536', '08765', '-1', '1.5', '1e3', '+8765', '8765/carplay', '8765?x=1', '8 765', '', null, 8765]) {
+    assert.throws(() => parseEndpoint('192.168.1.20', port), String(port));
+  }
 });
 
 test('AVC and HEVC configs remain Annex B and dimensions are bounded', () => {

@@ -1,12 +1,13 @@
-import { Contacts, fitRect, mapPointer, parseEndpoint } from './core.mjs';
-import { BrowserSession } from './session.mjs?v=disconnect-diagnostics-1';
+import { Contacts, fitRect, mapPointer } from './core.mjs?v=android-approval-v2';
+import { BrowserSession } from './session.mjs?v=android-approval-v2';
 
 const byId = id => document.getElementById(id);
 const form = byId('connection');
-const endpoint = byId('endpoint');
-const token = byId('token');
+const ip = byId('ip');
+const port = byId('port');
 const parked = byId('parked');
 const touch = byId('touch');
+const touchStatus = byId('touch-status');
 const connect = byId('connect');
 const disconnect = byId('disconnect');
 const canvas = byId('video');
@@ -26,7 +27,6 @@ let live = false;
 byId('origin').textContent = location.protocol === 'https:' ? location.origin : 'an HTTPS website origin';
 // Restored form state must never count as a fresh safety/control choice.
 parked.checked = touch.checked = false;
-token.value = '';
 
 function compatibilityError() {
   if (!isSecureContext || location.protocol !== 'https:') return 'Open this viewer over HTTPS. Insecure pages cannot connect.';
@@ -41,13 +41,13 @@ function compatibilityError() {
 
 const blocked = compatibilityError();
 const session = new BrowserSession({ WebSocket, VideoDecoder: window.VideoDecoder,
-  EncodedVideoChunk: window.EncodedVideoChunk, onState: setState, onFrame: queueFrame });
+  EncodedVideoChunk: window.EncodedVideoChunk, onState: setState, onFrame: queueFrame, onTouchOwnership: setTouchState });
 
 function updateControls() {
   const active = !session.closed;
   connect.disabled = Boolean(blocked) || active || !parked.checked;
   disconnect.disabled = !active;
-  endpoint.disabled = token.disabled = active;
+  ip.disabled = port.disabled = active;
   touch.disabled = !live || !parked.checked || active === false || !window.PointerEvent;
 }
 
@@ -55,12 +55,26 @@ function setState(state, text) {
   live = state === 'live';
   if (!live) {
     releaseContacts();
+    if (session.touchRequested || session.touchOwned) {
+      session.setTouchOwnership(false);
+      if (session.closed) return;
+    }
     touch.checked = false;
     canvas.classList.remove('touch-enabled');
     clearPicture();
   }
   status.textContent = text;
   indicator.dataset.state = state;
+  updateControls();
+}
+
+function setTouchState({ enabled, requested, pending }) {
+  if (!enabled) releaseContacts();
+  touch.checked = requested;
+  canvas.classList.toggle('touch-enabled', enabled && live && parked.checked);
+  touchStatus.textContent = pending
+    ? (requested ? 'Waiting for Android to enable touch…' : 'Releasing touch control…')
+    : (enabled ? 'Touch control active' : 'Touch control off');
   updateControls();
 }
 
@@ -138,7 +152,7 @@ function point(event, clamp = false) {
 }
 
 canvas.addEventListener('pointerdown', event => {
-  if (!touch.checked || !live || !parked.checked || (event.pointerType === 'mouse' && event.button !== 0)) return;
+  if (!session.touchOwned || !touch.checked || !live || !parked.checked || (event.pointerType === 'mouse' && event.button !== 0)) return;
   const coordinate = point(event);
   if (!coordinate || !contacts.down(event.pointerId, coordinate)) return;
   event.preventDefault();
@@ -163,12 +177,13 @@ function finishPointer(event) {
   if (canvas.hasPointerCapture?.(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
 }
 for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) canvas.addEventListener(name, finishPointer);
-canvas.addEventListener('contextmenu', event => { if (touch.checked) event.preventDefault(); });
+canvas.addEventListener('contextmenu', event => { if (session.touchOwned) event.preventDefault(); });
 
 touch.addEventListener('change', () => {
   if (!live || !parked.checked) touch.checked = false;
   releaseContacts();
-  canvas.classList.toggle('touch-enabled', touch.checked);
+  if (!session.setTouchOwnership(touch.checked)) touch.checked = false;
+  canvas.classList.toggle('touch-enabled', session.touchOwned);
 });
 parked.addEventListener('change', () => {
   if (!parked.checked) { releaseContacts(); session.close('Disconnected. Park safely before connecting again.'); }
@@ -179,11 +194,8 @@ form.addEventListener('submit', event => {
   event.preventDefault();
   if (blocked || !parked.checked || !session.closed || document.visibilityState !== 'visible') return;
   try {
-    const address = parseEndpoint(endpoint.value);
-    const pairingToken = token.value.trim();
-    token.value = '';
     touch.checked = false;
-    session.connect(address, pairingToken);
+    session.connect(ip.value, port.value);
   } catch (error) {
     status.textContent = error.message;
     indicator.dataset.state = 'error';
@@ -193,8 +205,7 @@ form.addEventListener('submit', event => {
 
 function leavePage() {
   releaseContacts();
-  session.close('Disconnected because this page is no longer visible. Re-enter the token to reconnect.');
-  token.value = '';
+  session.close('Disconnected because this page is no longer visible. Click Connect to request approval again.');
   parked.checked = touch.checked = false;
   updateControls();
 }
@@ -206,7 +217,7 @@ window.addEventListener('pageshow', event => { if (event.persisted) leavePage();
 if (window.ResizeObserver) new ResizeObserver(releaseContacts).observe(viewport);
 else window.addEventListener('resize', releaseContacts);
 
-status.textContent = blocked || 'Ready. Confirm you are parked, then enter the bridge details to connect.';
+status.textContent = blocked || 'Ready. Confirm you are parked, then enter the bridge IP and port to request Android approval.';
 indicator.dataset.state = blocked ? 'error' : 'closed';
 updateControls();
 

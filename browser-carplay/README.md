@@ -6,8 +6,10 @@ standalone CarPlay receiver. Audio and microphone remain outside this viewer.
 
 ## Deployment and connection
 
-Serve this directory from an **HTTPS origin you control**. The Android bridge
-must allow that exact origin (scheme, hostname, and non-default port; no path).
+The Android bridge pins the exact HTTPS origin **https://mark4z.github.io**.
+The published viewer is https://mark4z.github.io/tesla-browser-lab/browser-carplay/.
+Other origins are rejected; deployment elsewhere requires a separately reviewed
+source change, not an input field or security fallback.
 This source change does not publish the page. Do not add `upgrade-insecure-requests`
 to the hosting policy: the deliberately local `ws://` link uses Chrome's Local
 Network Access exemption, not a public TLS endpoint. Hosting may set an explicit
@@ -21,40 +23,60 @@ policy, rollouts, decoder availability, and embedded/in-car browser limitations
 can still prevent a connection. The viewer does not disable security checks or
 offer an HTTP/codec-library workaround. HEVC support is device-dependent.
 
-1. Park, enable the bridge in DiPlay, and configure this page's allowed origin.
+1. Park and enable the bridge in DiPlay on the trusted private Wi-Fi interface.
 2. Connect both devices to the same trusted private LAN.
-3. Enter the displayed `ws://<RFC1918 IPv4>:<port>/carplay` endpoint and ephemeral
-   pairing token. Neither is accepted from URL parameters. No scan/discovery runs.
+3. Enter the displayed private IPv4 address and port (1–65535) in separate fields.
+   The destination is always `ws://<RFC1918 IPv4>:<port>/carplay`; no URL, token,
+   hostname, alternate path, URL parameters, or scan/discovery is accepted.
 4. Confirm parked use and click **Connect display**. Personally decide whether to
    allow the browser's local-network permission. The page does not grant it.
-5. Video starts only for this explicit connection. Enable touch separately if
-   wanted; up to two contacts match the existing CarPlay HID mapper.
+5. Within 30 seconds, tap **Accept** in the Android connection prompt. Each
+   connection requires a fresh decision; there is no remembered browser grant.
+6. Video starts only after Android accepts. Enable touch separately if wanted;
+   it stays inactive until Android acknowledges ownership. Up to two contacts
+   match the existing CarPlay HID mapper.
 
-The LAN link is **unencrypted**, including the pairing token and screen contents.
-Use only a trusted network. Do not expose the bridge to the internet. The viewer
-does not persist the token, retain it in the input after connecting, or log raw
-network data. JavaScript cannot promise cryptographic erasure of strings held by
-the browser. HTTPS secures page delivery, not the local transport.
+The LAN link is **unencrypted**, including video and touch controls. Use only a
+trusted network. Do not expose the bridge to the internet. The viewer has no
+pairing credentials, persistent approvals, or raw network-data logging. HTTPS
+secures page delivery, not the local transport.
 
 Hide/leave the page, lock the screen, uncheck parked use, or click Disconnect to
 close the session. Touch is released on pointer cancel/lost capture, focus loss,
-video reconfiguration, and resize. On reconnect, re-enter the token and explicitly
-enable touch again. The checkbox is a user declaration, not a vehicle-speed sensor.
+video reconfiguration, and resize. On reconnect, click Connect, accept again on
+Android, and explicitly enable touch again. The checkbox is a user declaration,
+not a vehicle-speed sensor.
 
 ## Wire protocol
 
-One WebSocket client to `/carplay`; client sends authentication as its first text
-message, never in the URL or subprotocol:
+One WebSocket client to `/carplay`. Protocol **v2** replaces token authentication
+with an explicit Android consent prompt. The first client text message is:
 
 ```json
-{"type":"auth","token":"<ephemeral token from Android>"}
+{"type":"requestApproval","version":2}
 ```
 
-The server replies `{"type":"authenticated"}`. While no stream is available it
-may send `{"type":"status","code":"waiting"}` or code `disconnected`.
-These clear decoded video but keep the authenticated socket waiting for config.
-A generic `{"type":"error"}` closes the session; arbitrary server strings are
-never rendered or logged.
+The server must first reply `{"type":"approvalPending","version":2}`, then only
+after the user taps Accept on Android send `{"type":"authenticated","version":2}`.
+No video, config, keyframe request, touch ownership request, or touch packet is
+accepted before the authenticated acknowledgment. The viewer closes if approval
+has not completed within 30 seconds of its request. Repeated pending messages
+cannot extend this deadline. Disconnect cancels the request; reconnect always
+requires another explicit click and Android approval.
+
+Reject, timeout, and protocol mismatch use `{ "type":"error", "version":2,
+"code":"approvalRejected" }`, with `approvalTimeout` or `upgradeRequired` as the
+other codes. The server can instead close with WebSocket code 1008 and one of
+those exact reasons. The viewer maps only those constants to fixed safe text;
+arbitrary error strings or close reasons are never displayed or logged. Numeric
+close codes and the lifecycle phase remain available for troubleshooting.
+Unversioned, legacy, mismatched, or out-of-order handshakes fail closed and advise
+installing the latest DiPlay APK and reloading this viewer together.
+
+While no stream is available, an approved connection may receive
+`{"type":"status","code":"waiting"}` or code `disconnected`. These clear video
+and touch ownership but keep the approved socket waiting for config. Other errors
+close the session. There is no automatic reconnect.
 
 When video is available, send e.g.:
 
@@ -97,8 +119,32 @@ superseded, stale, rendered, and cancelled frames are closed. Browser/network
 WebSocket buffers are outside JavaScript's control; the server must also bound
 its output queue.
 
+Touch ownership is a separate, explicit opt-in for the current video stream:
+
+```json
+{"type":"setTouchOwnership","enabled":true,"streamId":1,"requestId":1}
+```
+
+The checkbox requests ownership; it does **not** immediately enable browser
+pointer control. Only the matching acknowledgment enables touch:
+
+```json
+{"type":"touchOwnership","enabled":true,"streamId":1,"requestId":1}
+```
+
+`requestId` is a positive safe integer, monotonically increasing for the lifetime
+of the page session object. The acknowledgment must match both the latest
+`requestId` and current `streamId`. Delayed or unsolicited enables cannot restore
+control, including rapid uncheck/recheck. An `enabled:false` acknowledgment for
+the current request revokes ownership. Unchecking sends a new explicit
+`setTouchOwnership` with `enabled:false` and disables pointer control immediately.
+Configuration replacement, inactive status, and disconnect clear ownership and
+pending requests. Decoder recovery also disables the checkbox and releases
+ownership. A fresh opt-in is required to resume control.
+
 Touch snapshots are `{"type":"touch","streamId":1,"contacts":[{"id":0,"x":0.5,"y":0.5}]}`.
-The identifier must match the current video configuration. The server rejects
+The identifier must match the current video configuration, and the viewer must
+hold acknowledged touch ownership. The server rejects
 stale or missing identifiers, even for empty releases, and releases native
 contacts itself during media reconfiguration. This prevents in-flight gestures
 from controlling a replacement CarPlay stream over the same WebSocket.
@@ -121,8 +167,8 @@ node --check site/browser-carplay/session.mjs
 ```
 
 The dependency-free tests exercise strict endpoint validation, framing, codec
-configuration, letterbox geometry, stable contacts, authentication gating,
-timeouts, codec negotiation races, backpressure, recovery, and explicit reconnect.
-They use synthetic bytes and test tokens only. Real HTTPS-to-LAN browser permission,
+configuration, letterbox geometry, stable contacts, approval/version gating,
+rejection/expiry, stale touch acknowledgments, timeouts, codec negotiation races, backpressure, recovery, and explicit reconnect.
+They use synthetic bytes and identifiers only. Real HTTPS-to-LAN browser permission,
 hardware AVC/HEVC decoding, physical two-finger gestures, background suspension,
 and CarPlay hardware integration still require a parked-device test.

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { BrowserSession } from '../session.mjs';
 
-test('default timers retain their browser receiver through connect, auth, close and reconnect', t => {
+test('default timers retain their browser receiver through connect, approval, close and reconnect', t => {
   // Node timers accept arbitrary receivers; browser Window timers do not.
   // Model that host check so ordinary lifecycle mocks cannot hide this bug.
   const timers = new Map(), sockets = [], states = [];
@@ -22,15 +22,16 @@ test('default timers retain their browser receiver through connect, auth, close 
     close() { this.readyState = 3; }
   }
   const session = new BrowserSession({ WebSocket: Socket, onState: state => states.push(state) });
-  const connect = () => session.connect('ws://192.168.1.20:8765/carplay', 'synthetic-timer-test');
+  const connect = () => session.connect('192.168.1.20', '8765');
   connect();
   assert.equal(timers.size, 1);
   assert.equal([...timers.values()][0].delay, 60000);
   sockets[0].readyState = 1;
   sockets[0].onopen();
   assert.equal(timers.size, 1);
-  assert.equal([...timers.values()][0].delay, 10000);
-  session.receiveText('{"type":"authenticated"}');
+  assert.equal([...timers.values()][0].delay, 30000);
+  session.receiveText('{"type":"approvalPending","version":2}');
+  session.receiveText('{"type":"authenticated","version":2}');
   assert.equal(timers.size, 0);
   session.close();
   session.close();

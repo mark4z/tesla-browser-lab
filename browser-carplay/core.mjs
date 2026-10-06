@@ -4,10 +4,14 @@ export const MAX_CONTACTS = 2;
 export const MAX_VIDEO_PACKET_BYTES = 4 * 1024 * 1024 + 9;
 export const MAX_DECODE_QUEUE = 4;
 
-export function parseEndpoint(value) {
-  const match = /^ws:\/\/((?:\d{1,3}\.){3}\d{1,3}):([1-9]\d{0,4})\/carplay$/.exec(value.trim());
-  if (!match) throw new Error('Enter the exact ws://private-IPv4:port/carplay address shown by DiPlay.');
-  const octets = match[1].split('.');
+// Construct, never parse, the network destination: inputs cannot supply a scheme,
+// hostname, credentials, path, query, fragment, or browser-normalized IP alias.
+export function parseEndpoint(ip, port) {
+  if (typeof ip !== 'string' || typeof port !== 'string') throw new Error('Enter the private IPv4 address and port shown in DiPlay.');
+  ip = ip.trim();
+  port = port.trim();
+  if (!/^(?:\d{1,3}\.){3}\d{1,3}$/.test(ip)) throw new Error('Enter only the private IPv4 address, for example 192.168.1.20.');
+  const octets = ip.split('.');
   if (octets.some(part => Number(part) > 255 || String(Number(part)) !== part)) {
     throw new Error('Use an ordinary dotted private IPv4 address.');
   }
@@ -15,8 +19,8 @@ export function parseEndpoint(value) {
   if (!(a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168))) {
     throw new Error('Only private LAN addresses (10.x, 172.16–31.x, or 192.168.x) are allowed.');
   }
-  if (Number(match[2]) > 65535) throw new Error('The endpoint port must be between 1 and 65535.');
-  return `ws://${match[1]}:${match[2]}/carplay`;
+  if (!/^[1-9]\d{0,4}$/.test(port) || Number(port) > 65535) throw new Error('The port must be a whole number between 1 and 65535.');
+  return `ws://${ip}:${port}/carplay`;
 }
 
 export function parseConfig(message) {
