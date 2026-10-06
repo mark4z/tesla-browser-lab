@@ -1,8 +1,8 @@
 # Experimental browser CarPlay viewer
 
 Static HTML/CSS/ES modules; no dependencies, telemetry, storage, or automatic
-connection. This is a video-and-touch companion to the Android bridge, not a
-standalone CarPlay receiver. Audio and microphone remain outside this viewer.
+connection. This is a video, touch, and optional audio companion to the Android bridge, not a
+standalone CarPlay receiver. Browser microphone uplink is not included.
 
 ## Deployment and connection
 
@@ -36,7 +36,11 @@ offer an HTTP/codec-library workaround. HEVC support is device-dependent.
    it stays inactive until Android acknowledges ownership. Up to two contacts
    match the existing CarPlay HID mapper.
 
-The LAN link is **unencrypted**, including video and touch controls. Use only a
+Click **Play audio here** after approval to move sound to the browser. A successful
+user-gesture Web Audio start is required. Stopping browser audio, hiding the page,
+or disconnecting returns playback to Android.
+
+The LAN link is **unencrypted**, including video, audio, and touch controls. Use only a
 trusted network. Do not expose the bridge to the internet. The viewer has no
 pairing credentials, persistent approvals, or raw network-data logging. HTTPS
 secures page delivery, not the local transport.
@@ -112,9 +116,11 @@ asserted in this phase. Payload is capped at 4 MiB. A keyframe must contain all 
 
 Client sends `{"type":"requestKeyframe"}` on configuration, overload, or decode
 error (at most once/second). The decoder queue is bounded to four encoded chunks;
-overload resets the decoder and discards deltas until a keyframe. There is no
-application-level encoded-frame backlog. Repeated decoder recovery without any
-output closes the session. One pending decoded frame is kept for the next paint;
+overload discards dependent deltas and lets submitted work drain, then replaces
+the decoder at a fresh keyframe. There is no application-level encoded-frame
+backlog. Decoder errors have bounded retries; recovery with no usable output
+for ten seconds closes the session. Transient saturation does not itself spend
+the decoder-error retry budget. One pending decoded frame is kept for the next paint;
 superseded, stale, rendered, and cancelled frames are closed. Browser/network
 WebSocket buffers are outside JavaScript's control; the server must also bound
 its output queue.
@@ -138,9 +144,12 @@ of the page session object. The acknowledgment must match both the latest
 control, including rapid uncheck/recheck. An `enabled:false` acknowledgment for
 the current request revokes ownership. Unchecking sends a new explicit
 `setTouchOwnership` with `enabled:false` and disables pointer control immediately.
-Configuration replacement, inactive status, and disconnect clear ownership and
-pending requests. Decoder recovery also disables the checkbox and releases
-ownership. A fresh opt-in is required to resume control.
+Configuration replacement and decoder recovery clear active ownership, pending
+requests, and held contacts, but preserve the user’s touch choice on the same
+approved connection. Once fresh video is available, a new ownership request must
+receive a matching acknowledgment before touch resumes. Identical configs do not
+create a new stream generation. Inactive status and real disconnect clear both
+ownership and the user’s choice; a fresh opt-in is then required.
 
 Touch snapshots are `{"type":"touch","streamId":1,"contacts":[{"id":0,"x":0.5,"y":0.5}]}`.
 The identifier must match the current video configuration, and the viewer must
@@ -155,6 +164,63 @@ the picture clamp to the edge. Up/cancel immediately sends only surviving contac
 including `[]` for final release. The bridge must synthesize releases and clear
 all native contacts if the connection closes. Slow outbound control links close
 instead of accumulating stale moves or dropping a release.
+
+## Optional browser audio
+
+Audio remains on Android by default. A user gesture creates/resumes an AudioContext,
+loads the same-origin AudioWorklet, and only then sends:
+
+```json
+{"type":"audioMode","enabled":true,"requestId":1}
+```
+
+The positive safe request ID is monotonic for the player lifetime. Android echoes
+it in `audioState` with boolean `enabled` and a positive `epoch`; only the current
+request can activate playback. A mismatched reply cannot cancel a later request.
+Unsolicited disabled states revoke playback. A five-second handoff deadline restores
+Android output. Disabled state, tab hide, socket close, and audio-context suspension
+clear PCM and restore native playback. Nothing is stored, and a new connection
+requires another audio-button click. Audio does not request microphone permission.
+
+The existing Android AAC/Opus/LPCM renderer exports signed 16-bit little-endian PCM.
+This uses the actual decoder output sample rate/channels/encoding; unsupported PCM
+reports a fixed error and keeps native output. Native AudioTracks continue pacing
+while muted for browser playback. Per-renderer focus gain is included in packets.
+No AAC/Opus browser decoder support is required. PCM bandwidth at 48kHz stereo is
+about 1.54 Mbit/s before transport overhead.
+
+Binary kind 3 uses this self-describing 36-byte header (big-endian metadata):
+
+| Offset | Value |
+| --- | --- |
+| 0 | 3 (audio) |
+| 1 | envelope version 1 |
+| 2 | encoding 1 (PCM16 little-endian) |
+| 3 | channels, 1 or 2 |
+| 4–7 | route epoch |
+| 8–11 | per-route stream ID |
+| 12–15 | sample rate, 8000–192000 Hz |
+| 16–23 | first PCM sample-frame counter |
+| 24–27 | frame count, 1–4096 |
+| 28–31 | float32 gain, 0–1 |
+| 32 | discontinuity flag bit 0; remaining bits reserved |
+| 33–35 | reserved zero |
+| 36 onward | interleaved signed PCM16 samples |
+
+Gaps in sample counters reset a stream’s playout queue. `audioStopped` carries
+`epoch`, `streamId`, and `lastSample`, so prioritized control does not discard valid
+tail PCM. Epochs prevent older routes from playing; transport callbacks are bound
+to the exact approved socket so old workers cannot send to a replacement viewer.
+
+PCM has a four-packet producer queue, a separate eight-packet/64KiB LAN queue
+(including in-flight bytes), and at most eight messages/64KiB awaiting worklet
+credits. The worklet mixes up to eight streams with at most 160ms of PCM per stream,
+resampling to the AudioContext rate. Old PCM is shed under pressure; video references
+are handled separately through keyframe recovery. Control goes first, with fair
+alternation of ready audio and video. Native/source buffering and browser/network
+buffers add latency; no fixed end-to-end latency or A/V synchronization is claimed.
+Music, navigation, prompts, and call downlink require parked hardware validation;
+this does not implement browser microphone/call uplink.
 
 ## Validation
 

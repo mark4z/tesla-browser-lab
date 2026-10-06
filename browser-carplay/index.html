@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src ws:; img-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self' ws:; worker-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
   <title>DiPlay · Browser CarPlay preview</title>
   <link rel="stylesheet" href="viewer.css">
-  <script type="module" src="viewer.mjs?v=android-approval-v2"></script>
+  <script type="module" src="viewer.mjs?v=browser-av-v3"></script>
 </head>
 <body>
 <main>
@@ -28,7 +28,7 @@
         <li>Set the bridge’s allowed website origin to <output id="origin">this page’s HTTPS origin</output>.</li>
         <li>Enter its private IPv4 address and port below. Click Connect, allow Chrome’s local-network permission if you choose, then tap Accept in DiPlay on Android.</li>
       </ol>
-      <p class="warning">The local WebSocket link is unencrypted, including video and touch controls. Use only your own trusted private network. HTTPS protects this page, not that local link.</p>
+      <p class="warning">The local WebSocket link is unencrypted, including video, audio, and touch controls. Use only your own trusted private network. HTTPS protects this page, not that local link.</p>
     </div>
     <form id="connection" autocomplete="off">
       <label for="ip">Android bridge IP address</label>
@@ -52,17 +52,21 @@
         <span id="touch-status" role="status" aria-live="polite">Touch control off</span>
       </div>
     </div>
+    <div class="audio-toolbar">
+      <button id="audio" class="secondary" type="button" disabled aria-describedby="audio-status">Play audio here</button>
+      <span id="audio-status" role="status" aria-live="polite">Audio plays on Android until you choose this browser.</span>
+    </div>
     <div id="viewport">
       <canvas id="video" width="1280" height="720" aria-label="Live CarPlay video; enable touch control to interact"></canvas>
       <div id="placeholder"><strong>Your display will appear here</strong><span>No connection starts until you click Connect.</span></div>
     </div>
-    <p class="display-note">Touch stays off until you enable it and Android confirms ownership, with up to two simultaneous contacts. Turn it off to release control. Switching tabs, locking the screen, or leaving this page disconnects. There is no automatic reconnect.</p>
+    <p class="display-note">Touch stays off until you enable it and Android confirms ownership, with up to two simultaneous contacts. Turn it off to release control. Brief video recovery releases held contacts and restores your touch choice after a fresh Android acknowledgment. Switching tabs, locking the screen, or leaving this page disconnects. There is no automatic reconnect.</p>
   </section>
   <details>
     <summary>Browser requirements &amp; privacy</summary>
     <p>Open this page over HTTPS in Chrome 147 or later with WebCodecs and Local Network Access support. Embedded WebViews, older browsers, and many in-car browsers may not support this flow. Install the latest DiPlay APK and reload this viewer together: both must support Android approval (protocol v2). A supported codec is checked when the bridge sends its configuration. H.265 support depends on the browser and device.</p>
     <p>If a connection is blocked, check the site’s local-network permission, the bridge’s allowed origin, and that both devices share a trusted LAN. Do not disable browser security, ignore certificate warnings, or expose the bridge to the internet.</p>
-    <p>This viewer has no analytics, third-party scripts, uploads, recording, credential storage, audio, or microphone access. Video stays between the Android bridge and this browser. The parked checkbox is your confirmation; this page does not detect vehicle speed.</p>
+    <p>Click Play audio here to move playback from Android to this browser. Stop browser audio to return playback to Android. Audio needs Web Audio and AudioWorklet support; it is experimental and is not a guarantee of synchronized audio/video or call support. This viewer has no analytics, third-party scripts, internet media uploads, recording, credential storage, or microphone access. Video and audio stay between the Android bridge and this browser. The parked checkbox is your confirmation; this page does not detect vehicle speed.</p>
     <p><a href="https://groups.google.com/a/chromium.org/g/blink-dev/c/O6GMKt44Ups" target="_blank" rel="noopener noreferrer">Chrome’s local WebSocket requirements</a></p>
   </details>
   <noscript><p class="warning">JavaScript and WebCodecs are required. No connection has been started.</p></noscript>

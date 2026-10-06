@@ -1,4 +1,4 @@
-import { MAX_DECODE_QUEUE, parseConfig, parseEndpoint, parseVideoPacket } from './core.mjs?v=android-approval-v2';
+import { MAX_DECODE_QUEUE, parseConfig, parseEndpoint, parseVideoPacket } from './core.mjs?v=browser-av-v3';
 
 export const PROTOCOL_VERSION = 2;
 const UPGRADE_ADVICE = 'Install the latest DiPlay APK and reload the updated browser viewer; both must support Android approval (protocol v2).';
@@ -13,12 +13,12 @@ const APPROVAL_ERRORS = {
 // backpressure are tested without a network, browser, or real accessory identity.
 export class BrowserSession {
   constructor({ WebSocket, VideoDecoder, EncodedVideoChunk, onState, onFrame,
-    onTouchOwnership = () => {},
+    onTouchOwnership = () => {}, onAudioMessage = () => {}, onAudioPacket = () => {}, onAudioReset = () => {},
     now = () => performance.now(),
     // Window timers require their host receiver, not this BrowserSession.
     setTimer = (callback, delay) => globalThis.setTimeout(callback, delay),
     clearTimer = id => globalThis.clearTimeout(id) }) {
-    Object.assign(this, { WebSocket, VideoDecoder, EncodedVideoChunk, onState, onFrame, onTouchOwnership, now, setTimer, clearTimer });
+    Object.assign(this, { WebSocket, VideoDecoder, EncodedVideoChunk, onState, onFrame, onTouchOwnership, onAudioMessage, onAudioPacket, onAudioReset, now, setTimer, clearTimer });
     this.socket = null;
     this.decoder = null;
     this.config = null;
@@ -36,8 +36,10 @@ export class BrowserSession {
     this.needsKeyframe = true;
     this.lastKeyframeRequest = -Infinity;
     this.timeout = null;
+    this.videoTimeout = null;
     this.closed = true;
     this.consecutiveRecoveries = 0;
+    this.backpressured = false;
   }
 
   connect(ip, port) {
@@ -161,6 +163,8 @@ export class BrowserSession {
       this.touchPending = false;
       if (!message.enabled) this.touchRequested = false;
       this.reportTouchOwnership();
+    } else if (['audioState', 'audioStopped', 'audioError'].includes(message.type)) {
+      this.onAudioMessage(message);
     } else if (message.type === 'status' && ['waiting', 'disconnected'].includes(message.code)) {
       this.clearDecoder();
       this.reportState('waiting', 'Approved on Android. Waiting for CarPlay video…');
@@ -170,7 +174,8 @@ export class BrowserSession {
   }
 
   async configure(message) {
-    this.clearDecoder();
+    this.clearDecoder({ preserveTouchIntent: true });
+    if (this.closed) return;
     const version = this.configVersion;
     this.reportState('configuring', 'Checking support for the bridge’s video codec…');
     try {
@@ -197,14 +202,21 @@ export class BrowserSession {
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close();
     this.needsKeyframe = true;
     this.streaming = false;
+    this.backpressured = false;
     this.decoder = new this.VideoDecoder({
       output: frame => {
         if (this.closed || version !== this.decoderVersion) { frame.close(); return; }
+        // Output queued before a lost dependency cannot revive touch or stale video.
+        if (this.backpressured) { frame.close(); return; }
         this.consecutiveRecoveries = 0;
+        this.clearTimer(this.videoTimeout);
+        this.videoTimeout = null;
         if (!this.streaming) {
           this.streaming = true;
-          this.reportState('live', 'Live display. Touch control is optional and starts off.');
+          this.reportState('live', 'Live display. Touch control is optional.');
+          if (this.touchRequested && !this.touchOwned && !this.touchPending) this.setTouchOwnership(true);
         }
+        if (this.closed || version !== this.decoderVersion) { frame.close(); return; }
         try { this.onFrame(frame); } catch { frame.close(); this.close('The browser could not draw the video frame.', true); }
       },
       error: () => {
@@ -217,12 +229,36 @@ export class BrowserSession {
   receiveVideo(data) {
     if (this.closed) return;
     if (!this.authenticated) { this.close(`The bridge sent video before Android approval. ${UPGRADE_ADVICE}`, true); return; }
+    if (data instanceof ArrayBuffer && data.byteLength > 0 && new Uint8Array(data, 0, 1)[0] === 3) {
+      this.onAudioPacket(data);
+      return;
+    }
     let chunk;
     try { chunk = parseVideoPacket(data); } catch { this.close('The bridge sent an invalid video packet.', true); return; }
     // No encoded-frame array or pending async work per frame. Frames arriving during
     // codec negotiation are discarded; the fresh keyframe request repairs the gap.
     if (!this.decoder || this.decoder.state !== 'configured') return;
-    if (this.decoder.decodeQueueSize >= MAX_DECODE_QUEUE) this.recover();
+    if (this.decoder.decodeQueueSize >= MAX_DECODE_QUEUE) {
+      // A 60fps burst may fill the small decode queue before any output callback.
+      // Do not repeatedly destroy that in-flight work: drop dependent packets,
+      // drain the old decoder, and replace it only at a complete keyframe.
+      if (!this.backpressured) {
+        this.backpressured = true;
+        this.needsKeyframe = true;
+        this.streaming = false;
+        this.suspendTouch(true);
+        if (this.closed) return;
+        this.armVideoRecoveryDeadline();
+        this.reportState('recovering', 'Video decoder backlog. Waiting for a fresh keyframe…');
+      }
+      this.requestKeyframe();
+      return;
+    }
+    if (this.backpressured) {
+      if (chunk.type !== 'key') { this.requestKeyframe(); return; }
+      try { this.makeDecoder(); }
+      catch { this.close('The browser could not restart its video decoder.', true); return; }
+    }
     if (!this.decoder || this.closed) return;
     if (this.needsKeyframe && chunk.type !== 'key') { this.requestKeyframe(); return; }
     try {
@@ -239,6 +275,9 @@ export class BrowserSession {
       this.close('Video could not recover. Try a lower resolution or H.264 in DiPlay, then reconnect.', true);
       return;
     }
+    this.suspendTouch(true);
+    if (this.closed) return;
+    this.armVideoRecoveryDeadline();
     try {
       this.makeDecoder();
       this.reportState('recovering', 'Resynchronizing video. Waiting for a fresh keyframe…');
@@ -246,6 +285,14 @@ export class BrowserSession {
     } catch {
       this.close('The browser could not restart its video decoder.', true);
     }
+  }
+
+  armVideoRecoveryDeadline() {
+    // Do not extend this deadline on another overflow, keyframe or decoder reset.
+    // Only usable output clears it, so a genuinely stalled decoder stays bounded.
+    if (this.videoTimeout !== null) return;
+    this.videoTimeout = this.setTimer(() => this.close(
+      'The video decoder produced no recovered output for 10 seconds. Try a lower frame rate or resolution, then reconnect.', true), 10000);
   }
 
   requestKeyframe() {
@@ -258,7 +305,15 @@ export class BrowserSession {
   }
 
   setTouchOwnership(enabled) {
-    if (typeof enabled !== 'boolean' || !this.authenticated || this.streamId === null || (enabled && !this.streaming)) return false;
+    if (typeof enabled !== 'boolean' || !this.authenticated || this.closed) return false;
+    // The user's opt-out must work while an asynchronous config probe has no ID.
+    if (!enabled && this.streamId === null) {
+      this.touchRequested = this.touchOwned = this.touchPending = false;
+      this.currentTouchRequestId = null;
+      this.reportTouchOwnership();
+      return true;
+    }
+    if (this.streamId === null || (enabled && !this.streaming)) return false;
     // Disable locally before writing to the socket, including if that write fails.
     if (!Number.isSafeInteger(this.touchRequestId + 1)) { this.close('Touch request limit reached. Reopen this page to reconnect.', true); return false; }
     this.currentTouchRequestId = ++this.touchRequestId;
@@ -294,16 +349,43 @@ export class BrowserSession {
     catch { this.close('The local bridge connection was lost.', true); return false; }
   }
 
-  clearDecoder() {
+  setAudioEnabled(enabled, requestId) {
+    return typeof enabled === 'boolean' && Number.isSafeInteger(requestId) && requestId > 0 &&
+      this.send({ type: 'audioMode', enabled, requestId });
+  }
+
+  suspendTouch(preserveIntent) {
+    const requested = preserveIntent && this.touchRequested;
+    const needsRelease = this.touchRequested || this.touchOwned || this.touchPending;
+    const streamId = this.streamId;
+    this.touchRequested = requested;
+    this.touchOwned = this.touchPending = false;
+    this.currentTouchRequestId = null;
+    this.reportTouchOwnership();
+    if (!this.closed && needsRelease && streamId !== null) {
+      if (!Number.isSafeInteger(this.touchRequestId + 1)) {
+        this.close('Touch request limit reached. Reopen this page to reconnect.', true);
+        return;
+      }
+      // Do not make this release ACK current: it must neither clear saved intent
+      // nor authorize input. The next enable gets a strictly newer request ID.
+      this.send({ type: 'setTouchOwnership', enabled: false, streamId, requestId: ++this.touchRequestId });
+    }
+  }
+
+  clearDecoder({ preserveTouchIntent = false } = {}) {
+    this.suspendTouch(preserveTouchIntent);
+    if (!preserveTouchIntent) {
+      this.clearTimer(this.videoTimeout);
+      this.videoTimeout = null;
+    }
     this.configVersion += 1;
     this.decoderVersion += 1;
     this.streaming = false;
     this.needsKeyframe = true;
+    this.backpressured = false;
     this.config = null;
     this.streamId = null;
-    this.touchRequested = this.touchOwned = this.touchPending = false;
-    this.currentTouchRequestId = null;
-    this.reportTouchOwnership();
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close();
     this.decoder = null;
   }
@@ -318,6 +400,7 @@ export class BrowserSession {
     this.clearTimer(this.timeout);
     this.timeout = null;
     this.clearDecoder();
+    this.onAudioReset();
     const socket = this.socket;
     this.socket = null;
     if (socket) {

@@ -101,13 +101,15 @@ test('decode queue is bounded and overload resynchronizes instead of queuing del
   assert.equal(h.decoders[0].chunks.length, MAX_DECODE_QUEUE);
   h.advance(1100);
   socket.receive(packet(2));
-  assert.equal(h.decoders[0].state, 'closed');
-  assert.equal(h.decoders.length, 2);
-  assert.equal(h.decoders[1].chunks.length, 0);
+  assert.equal(h.decoders[0].state, 'configured');
+  assert.equal(h.decoders.length, 1);
+  assert.equal(h.decoders[0].chunks.length, MAX_DECODE_QUEUE);
   assert.equal(h.session.needsKeyframe, true);
   assert.equal(h.states.at(-1).state, 'recovering');
   assert.deepEqual(socket.sent.at(-1), { type: 'requestKeyframe' });
+  h.decoders[0].decodeQueueSize = 0;
   socket.receive(packet(1));
+  assert.equal(h.decoders[0].state, 'closed');
   assert.equal(h.decoders[1].chunks.length, 1);
   assert.equal(h.decoders[0].emit().closed, true, 'stale output must be closed');
 });
@@ -475,14 +477,14 @@ test('touch ownership requires explicit request and matching stream and request 
   h.session.close();
 });
 
-test('reconfiguration and disconnect clear acknowledged and pending touch ownership', async () => {
+test('reconfiguration preserves intent, requires a new ACK, and disconnect clears ownership', async () => {
   const h = harness();
   const socket = await h.ready();
   h.decoders[0].emit();
   ownTouch(h.session, socket);
   const oldRequest = { type: 'touchOwnership', enabled: true, streamId: 1, requestId: 1 };
   socket.receive({ ...CONFIG, streamId: 2 });
-  assert.equal(h.session.touchRequested, false);
+  assert.equal(h.session.touchRequested, true);
   assert.equal(h.session.touchOwned, false);
   assert.equal(h.session.touchPending, false);
   socket.receive(oldRequest);
@@ -490,9 +492,11 @@ test('reconfiguration and disconnect clear acknowledged and pending touch owners
   h.decoders.at(-1).emit();
   socket.receive(oldRequest);
   assert.equal(h.session.touchOwned, false);
-  h.session.setTouchOwnership(true);
+  assert.equal(h.session.touchPending, true, 'fresh output requests ownership again');
   assert.equal(socket.sent.at(-1).streamId, 2);
-  assert.equal(socket.sent.at(-1).requestId, 2);
+  assert.equal(socket.sent.at(-1).requestId, 3);
+  socket.receive({ ...socket.sent.at(-1), type: 'touchOwnership' });
+  assert.equal(h.session.touchOwned, true);
   h.session.close();
   assert.equal(h.session.touchPending, false);
   assert.equal(h.session.currentTouchRequestId, null);
@@ -510,4 +514,156 @@ test('malformed ownership acknowledgments fail closed', async () => {
     assert.equal(h.session.closed, true);
     assert.equal(h.session.touchOwned, false);
   }
+});
+
+
+test('a 60fps burst drains the existing decoder before resync instead of restart starvation', async () => {
+  const h = harness();
+  const socket = await h.ready();
+  socket.receive(packet(1));
+  h.decoders[0].emit();
+  ownTouch(h.session, socket);
+  const oldEnable = socket.sent.at(-1);
+  for (let i = 1; i < MAX_DECODE_QUEUE; i++) socket.receive(packet(2));
+  socket.receive(packet(2));
+  assert.equal(h.decoders.length, 1, 'overload must not discard work already decoding');
+  assert.equal(h.session.touchRequested, true);
+  assert.equal(h.session.touchOwned, false);
+  assert.equal(h.session.sendContacts([{ id: 0, x: .2, y: .2 }]), false);
+  const disable = socket.sent.findLast(m => m.type === 'setTouchOwnership');
+  assert.equal(disable.enabled, false, 'native contacts must be released immediately');
+  for (let i = 0; i < 120; i++) { h.advance(17); socket.receive(packet(i % 60 ? 2 : 1)); }
+  assert.equal(h.decoders.length, 1, 'even keyframes cannot exceed the full decoder queue');
+  assert.equal(h.session.closed, false);
+  assert.equal(h.decoders[0].emit().closed, true, 'old outputs cannot restore control or live state');
+  h.decoders[0].decodeQueueSize = 0;
+  socket.receive(packet(2));
+  assert.equal(h.decoders.length, 1, 'no arbitrary delta may restart after loss');
+  socket.receive(packet(1));
+  assert.equal(h.decoders.length, 2);
+  assert.equal(h.decoders[1].chunks.length, 1);
+  h.decoders[1].emit();
+  const freshEnable = socket.sent.at(-1);
+  assert.equal(freshEnable.type, 'setTouchOwnership');
+  assert.equal(freshEnable.enabled, true);
+  assert.ok(freshEnable.requestId > disable.requestId);
+  socket.receive({ ...oldEnable, type: 'touchOwnership' });
+  socket.receive({ ...disable, type: 'touchOwnership' });
+  assert.equal(h.session.touchOwned, false);
+  socket.receive({ ...freshEnable, type: 'touchOwnership' });
+  assert.equal(h.session.touchOwned, true);
+  assert.equal(h.sockets.length, 1);
+  h.session.close();
+});
+
+test('touch intent survives config probing but can be cancelled before the new stream is ready', async () => {
+  const h = harness();
+  const socket = await h.ready();
+  h.decoders[0].emit();
+  ownTouch(h.session, socket);
+  let resolve;
+  h.FakeDecoder.support = () => new Promise(r => { resolve = r; });
+  socket.receive({ ...CONFIG, streamId: 2 });
+  assert.equal(h.session.touchRequested, true);
+  assert.equal(h.session.touchOwned, false);
+  assert.equal(h.session.setTouchOwnership(false), true);
+  resolve({ supported: true });
+  await Promise.resolve();
+  const count = socket.sent.length;
+  h.decoders.at(-1).emit();
+  assert.equal(socket.sent.length, count, 'cancelled intent must not reacquire on later output');
+  assert.equal(h.session.touchRequested, false);
+  h.session.close();
+});
+
+test('recovering retains intent only in the approved socket, not inactive status or reconnection', async () => {
+  const h = harness();
+  const socket = await h.ready();
+  h.decoders[0].emit();
+  ownTouch(h.session, socket);
+  h.decoders[0].error();
+  assert.equal(h.session.touchRequested, true);
+  assert.equal(h.session.touchOwned, false);
+  socket.receive({ type: 'status', code: 'disconnected' });
+  assert.equal(h.session.touchRequested, false);
+  socket.receive({ ...CONFIG, streamId: 2 });
+  await Promise.resolve();
+  h.decoders.at(-1).emit();
+  assert.equal(h.session.touchOwned, false);
+  ownTouch(h.session, socket);
+  h.decoders.at(-1).error();
+  socket.end(1006);
+  h.connect();
+  assert.equal(h.session.touchRequested, false);
+  assert.equal(h.session.authenticated, false);
+  h.session.close();
+});
+
+test('no-output recovery deadline cannot be extended by repeated bursts or codec resets', async () => {
+  const h = harness();
+  const socket = await h.ready();
+  socket.receive(packet(1));
+  for (let i = 1; i < MAX_DECODE_QUEUE; i++) socket.receive(packet(2));
+  socket.receive(packet(2));
+  const deadline = [...h.timers.values()][0];
+  assert.equal(deadline.delay, 10000);
+  for (let i = 0; i < 200; i++) socket.receive(packet(2));
+  h.decoders[0].decodeQueueSize = 0;
+  socket.receive(packet(1));
+  assert.equal([...h.timers.values()][0], deadline);
+  assert.equal(h.session.closed, false);
+  deadline.callback();
+  assert.equal(h.session.closed, true);
+  assert.equal(h.timers.size, 0);
+  assert.match(h.states.at(-1).message, /no recovered output for 10 seconds/);
+});
+
+test('usable recovered output clears its watchdog and never persists consent into a new socket', async () => {
+  const h = harness();
+  const socket = await h.ready();
+  h.decoders[0].error();
+  assert.equal(h.timers.size, 1);
+  socket.receive(packet(1));
+  h.decoders.at(-1).emit();
+  assert.equal(h.timers.size, 0);
+  assert.equal(h.session.closed, false);
+  h.session.close();
+});
+
+test('audio is approval-gated and independent of video recovery on the same socket', async () => {
+  const preapproval = harness();
+  const rejectedAudio = [];
+  preapproval.session.onAudioPacket = value => rejectedAudio.push(value);
+  const pending = preapproval.connect();
+  assert.equal(preapproval.session.setAudioEnabled(true, 1), false);
+  const audio = new ArrayBuffer(36);
+  new Uint8Array(audio)[0] = 3;
+  pending.receive(audio);
+  assert.equal(preapproval.session.closed, true);
+  assert.equal(rejectedAudio.length, 0);
+
+  const h = harness();
+  const packets = [], messages = [];
+  let resets = 0;
+  h.session.onAudioPacket = value => packets.push(value);
+  h.session.onAudioMessage = value => messages.push(value);
+  h.session.onAudioReset = () => { resets++; };
+  const socket = await h.ready();
+  assert.equal(h.session.setAudioEnabled(true, 1), true);
+  assert.deepEqual(socket.sent.at(-1), { type: 'audioMode', enabled: true, requestId: 1 });
+  socket.receive({ type: 'audioState', enabled: true, epoch: 1 });
+  socket.receive(audio);
+  assert.equal(packets[0], audio);
+  assert.equal(messages[0].epoch, 1);
+  assert.equal(h.decoders[0].chunks.length, 0);
+  h.decoders[0].error();
+  socket.receive(audio);
+  socket.receive({ ...CONFIG, streamId: 2 });
+  await Promise.resolve();
+  socket.receive(audio);
+  assert.equal(resets, 0, 'video-only recovery must not tear down audio');
+  assert.equal(packets.length, 3);
+  h.session.close();
+  assert.equal(resets, 1);
+  assert.equal(h.session.setAudioEnabled(true, 1), false);
 });

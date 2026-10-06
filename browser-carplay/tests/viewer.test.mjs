@@ -26,7 +26,7 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
     releasePointerCapture(id) { captured.delete(id); this.dispatch('lostpointercapture', { pointerId: id }); }
   }
   const elements = Object.fromEntries(['connection', 'ip', 'port', 'parked', 'touch', 'connect', 'disconnect',
-    'video', 'viewport', 'placeholder', 'status', 'indicator', 'origin', 'touch-status'].map(id => [id, new Element()]));
+    'video', 'viewport', 'placeholder', 'status', 'indicator', 'origin', 'touch-status', 'audio', 'audio-status'].map(id => [id, new Element()]));
   elements.parked.checked = true;
   elements.touch.checked = true;
   const document = Object.assign(new Events(), { visibilityState: 'visible', getElementById: id => elements[id] });
@@ -49,11 +49,22 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
       this.output(frame); return frame;
     }
   }
+  const audioContexts = [];
+  class AudioContext {
+    constructor() { this.state = 'suspended'; this.destination = {}; this.audioWorklet = { addModule: async () => {} }; audioContexts.push(this); }
+    async resume() { this.state = 'running'; }
+    async close() { this.state = 'closed'; }
+  }
+  class AudioWorkletNode {
+    constructor() { this.port = { postMessage() {}, close() {} }; }
+    connect() {}
+    disconnect() {}
+  }
   const window = Object.assign(new Events(), { VideoDecoder: Decoder, EncodedVideoChunk: class {}, PointerEvent: class {}, ResizeObserver: class { observe() {} } });
   window.top = window.self = window;
   Object.assign(globalThis, { document, window, location: { protocol: 'https:', origin: 'https://viewer.example' }, isSecureContext: true,
     VideoDecoder: Decoder, EncodedVideoChunk: window.EncodedVideoChunk, WebSocket: Socket, ResizeObserver: window.ResizeObserver,
-    devicePixelRatio: 1,
+    devicePixelRatio: 1, AudioContext, AudioWorkletNode,
     requestAnimationFrame: callback => { raf.set(++rafId, callback); return rafId; }, cancelAnimationFrame: id => raf.delete(id) });
   Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userAgent: 'Chrome/154.0.0.0' } });
   const paint = () => { const callbacks = [...raf.values()]; raf.clear(); callbacks.forEach(callback => callback()); };
@@ -61,6 +72,9 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
   await import('../viewer.mjs?ui-test');
 
   assert.equal(sockets.length, 0, 'page load must not connect');
+  assert.equal(audioContexts.length, 0, 'page load must not create an AudioContext');
+  elements.audio.dispatch('click');
+  assert.equal(audioContexts.length, 0, 'preapproval cannot start audio');
   assert.equal(elements.parked.checked, false, 'restored parked state is not fresh consent');
   assert.equal(elements.touch.checked, false);
   assert.equal(elements.connect.disabled, true);
@@ -101,6 +115,15 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
   assert.equal(elements.touch.checked, false);
   elements.video.dispatch('pointerdown', pointer(100));
   assert.equal(socket.sent.some(m => m.type === 'touch'), false, 'video must not implicitly enable touch');
+
+  elements.audio.dispatch('click');
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  const audioRequest = socket.sent.findLast(message => message.type === 'audioMode');
+  assert.equal(audioRequest.enabled, true);
+  assert.ok(Number.isSafeInteger(audioRequest.requestId));
+  socket.receive({ type: 'audioState', enabled: true, epoch: 10, requestId: audioRequest.requestId });
+  assert.equal(elements.audio.textContent, 'Return audio to Android');
+  assert.equal(audioContexts.length, 1);
 
   elements.touch.checked = true;
   elements.touch.dispatch('change');
@@ -160,21 +183,34 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
   socket.receive({ type: 'touchOwnership', enabled: true, streamId: 1, requestId: 3 });
   assert.equal(elements.video.classes.has('touch-enabled'), true);
 
+  elements.video.dispatch('pointerdown', pointer(451));
   socket.receive({ type: 'config', streamId: 2, codec: 'avc1.64001f', width: 1920, height: 1080 });
-  assert.equal(elements.touch.checked, false);
-  assert.equal(elements.touch.disabled, true);
+  assert.equal(captured.size, 0, 'reconfiguration releases held gestures');
+  assert.equal(elements.touch.checked, true);
+  assert.equal(elements.touch.disabled, false, 'saved intent can still be cancelled');
   assert.equal(elements.video.classes.has('touch-enabled'), false);
   socket.receive({ type: 'touchOwnership', enabled: true, streamId: 1, requestId: 3 });
   await Promise.resolve();
   decoders.at(-1).emit();
   paint();
-  assert.equal(elements.touch.checked, false, 'new stream requires another explicit touch opt-in');
-  assert.equal(elements.video.classes.has('touch-enabled'), false);
+  assert.equal(elements.touch.checked, true, 'same approved socket retains explicit opt-in');
+  assert.equal(audioContexts[0].state, 'running', 'benign video recovery leaves audio running');
+  assert.equal(elements.audio.textContent, 'Return audio to Android');
+  assert.equal(elements.video.classes.has('touch-enabled'), false, 'new generation still needs a matching ACK');
+  const resumedTouch = socket.sent.at(-1);
+  assert.equal(resumedTouch.enabled, true);
+  assert.equal(resumedTouch.streamId, 2);
+  assert.equal(resumedTouch.requestId, 5);
+  socket.receive({ ...resumedTouch, type: 'touchOwnership' });
+  assert.equal(elements.video.classes.has('touch-enabled'), true);
   const cancelled = decoders.at(-1).emit();
   document.visibilityState = 'hidden';
   document.dispatch('visibilitychange');
   assert.equal(cancelled.closes, 1, 'pending frame is closed on hide');
   assert.equal(socket.readyState, 3);
+  assert.equal(audioContexts[0].state, 'closed', 'tab hide closes audio');
+  assert.equal(elements.audio.disabled, true);
+  assert.equal(elements.audio.textContent, 'Play audio here');
   assert.equal(elements.placeholder.hidden, false);
   assert.equal(elements.parked.checked, false);
   assert.equal(elements.touch.checked, false);

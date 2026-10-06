@@ -1,5 +1,6 @@
-import { Contacts, fitRect, mapPointer } from './core.mjs?v=android-approval-v2';
-import { BrowserSession } from './session.mjs?v=android-approval-v2';
+import { Contacts, fitRect, mapPointer } from './core.mjs?v=browser-av-v3';
+import { BrowserSession } from './session.mjs?v=browser-av-v3';
+import { BrowserAudioPlayer } from './audio.mjs?v=browser-av-v3';
 
 const byId = id => document.getElementById(id);
 const form = byId('connection');
@@ -8,6 +9,8 @@ const port = byId('port');
 const parked = byId('parked');
 const touch = byId('touch');
 const touchStatus = byId('touch-status');
+const audioButton = byId('audio');
+const audioStatus = byId('audio-status');
 const connect = byId('connect');
 const disconnect = byId('disconnect');
 const canvas = byId('video');
@@ -23,6 +26,8 @@ let moveRequest = null;
 let videoWidth = 0;
 let videoHeight = 0;
 let live = false;
+let audioState = { enabled: false, ready: false, pending: false };
+let audioPlayer = null;
 
 byId('origin').textContent = location.protocol === 'https:' ? location.origin : 'an HTTPS website origin';
 // Restored form state must never count as a fresh safety/control choice.
@@ -41,25 +46,37 @@ function compatibilityError() {
 
 const blocked = compatibilityError();
 const session = new BrowserSession({ WebSocket, VideoDecoder: window.VideoDecoder,
-  EncodedVideoChunk: window.EncodedVideoChunk, onState: setState, onFrame: queueFrame, onTouchOwnership: setTouchState });
+  EncodedVideoChunk: window.EncodedVideoChunk, onState: setState, onFrame: queueFrame, onTouchOwnership: setTouchState,
+  onAudioMessage: message => audioPlayer?.handleMessage(message),
+  onAudioPacket: packet => audioPlayer?.handlePacket(packet),
+  onAudioReset: () => audioPlayer?.reset() });
+audioPlayer = new BrowserAudioPlayer({
+  sendMode: (enabled, requestId) => session.setAudioEnabled(enabled, requestId),
+  onState: state => {
+    audioState = state;
+    audioStatus.textContent = state.message;
+    updateControls();
+  },
+});
 
 function updateControls() {
   const active = !session.closed;
   connect.disabled = Boolean(blocked) || active || !parked.checked;
   disconnect.disabled = !active;
   ip.disabled = port.disabled = active;
-  touch.disabled = !live || !parked.checked || active === false || !window.PointerEvent;
+  audioButton.disabled = !session.authenticated || !active || !parked.checked;
+  audioButton.textContent = audioState.pending ? 'Cancel audio start'
+    : (audioState.enabled ? 'Return audio to Android' : 'Play audio here');
+  touch.disabled = (!live && !session.touchRequested) || !parked.checked || active === false || !window.PointerEvent;
 }
 
 function setState(state, text) {
   live = state === 'live';
   if (!live) {
     releaseContacts();
-    if (session.touchRequested || session.touchOwned) {
-      session.setTouchOwnership(false);
-      if (session.closed) return;
-    }
-    touch.checked = false;
+    // The session releases native ownership and invalidates ACKs. Keep the
+    // explicit checkbox intent while video recovers in this approved socket.
+    touch.checked = session.touchRequested;
     canvas.classList.remove('touch-enabled');
     clearPicture();
   }
@@ -74,7 +91,7 @@ function setTouchState({ enabled, requested, pending }) {
   canvas.classList.toggle('touch-enabled', enabled && live && parked.checked);
   touchStatus.textContent = pending
     ? (requested ? 'Waiting for Android to enable touch…' : 'Releasing touch control…')
-    : (enabled ? 'Touch control active' : 'Touch control off');
+    : (enabled ? 'Touch control active' : (requested ? 'Touch paused while video recovers…' : 'Touch control off'));
   updateControls();
 }
 
@@ -179,8 +196,14 @@ function finishPointer(event) {
 for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) canvas.addEventListener(name, finishPointer);
 canvas.addEventListener('contextmenu', event => { if (session.touchOwned) event.preventDefault(); });
 
+audioButton.addEventListener('click', () => {
+  if (!session.authenticated || session.closed || !parked.checked || document.visibilityState !== 'visible') return;
+  if (audioState.enabled || audioState.pending) audioPlayer.disable();
+  else void audioPlayer.enableFromGesture();
+});
+
 touch.addEventListener('change', () => {
-  if (!live || !parked.checked) touch.checked = false;
+  if (!parked.checked || (!live && touch.checked)) touch.checked = false;
   releaseContacts();
   if (!session.setTouchOwnership(touch.checked)) touch.checked = false;
   canvas.classList.toggle('touch-enabled', session.touchOwned);
