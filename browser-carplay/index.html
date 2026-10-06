@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src ws:; img-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <title>DiPlay · Browser CarPlay preview</title>
+  <link rel="stylesheet" href="viewer.css">
+  <script type="module" src="viewer.mjs"></script>
+</head>
+<body>
+<main>
+  <header>
+    <a class="brand" href="../">DiPlay<span>Browser CarPlay</span></a>
+    <span class="badge">Experimental · parked use only</span>
+  </header>
+  <section class="intro" aria-labelledby="title">
+    <p class="eyebrow">Your local display</p>
+    <h1 id="title">CarPlay, on a second screen.</h1>
+    <p>Connect this browser to the DiPlay bridge on your Android device. Keep both devices on the same trusted private Wi-Fi network.</p>
+  </section>
+  <section class="setup" aria-label="Connection settings">
+    <div>
+      <h2>Before you connect</h2>
+      <ol>
+        <li>Park safely. Enable the experimental browser bridge in DiPlay.</li>
+        <li>Set the bridge’s allowed website origin to <output id="origin">this page’s HTTPS origin</output>.</li>
+        <li>Enter its endpoint and temporary pairing token below. Click Connect, then allow Chrome’s local-network permission if you choose to proceed.</li>
+      </ol>
+      <p class="warning">The local WebSocket link is unencrypted, including the token, video, and touch controls. Use only your own trusted private network. HTTPS protects this page, not that local link.</p>
+    </div>
+    <form id="connection" autocomplete="off">
+      <label for="endpoint">Bridge endpoint</label>
+      <input id="endpoint" name="endpoint" type="text" inputmode="url" placeholder="ws://192.168.1.20:8765/carplay" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="100" required aria-describedby="endpoint-help">
+      <small id="endpoint-help">Copy the exact private IPv4 address and port shown in DiPlay.</small>
+      <label for="token">Temporary pairing token</label>
+      <input id="token" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="256" required aria-describedby="token-help">
+      <small id="token-help">Used for this connection only. Never put it in a URL. Re-enter it to reconnect.</small>
+      <label class="check"><input id="parked" type="checkbox" required> I’m safely parked and will disconnect before driving.</label>
+      <div class="actions">
+        <button id="connect" type="submit" disabled>Connect display</button>
+        <button id="disconnect" class="secondary" type="button" disabled>Disconnect</button>
+      </div>
+    </form>
+  </section>
+  <section class="display" aria-label="CarPlay display">
+    <div class="display-toolbar">
+      <div><span id="indicator" aria-hidden="true"></span><p id="status" role="status" aria-live="polite">Checking this browser…</p></div>
+      <label class="check"><input id="touch" type="checkbox" disabled> Enable touch control</label>
+    </div>
+    <div id="viewport">
+      <canvas id="video" width="1280" height="720" aria-label="Live CarPlay video; enable touch control to interact"></canvas>
+      <div id="placeholder"><strong>Your display will appear here</strong><span>No connection starts until you click Connect.</span></div>
+    </div>
+    <p class="display-note">Touch is off until you enable it, with up to two simultaneous contacts. Switching tabs, locking the screen, or leaving this page disconnects. There is no automatic reconnect.</p>
+  </section>
+  <details>
+    <summary>Browser requirements &amp; privacy</summary>
+    <p>Open this page over HTTPS in Chrome 147 or later with WebCodecs and Local Network Access support. Embedded WebViews, older browsers, and many in-car browsers may not support this flow. A supported codec is checked when the bridge sends its configuration. H.265 support depends on the browser and device.</p>
+    <p>If a connection is blocked, check the site’s local-network permission, the bridge’s allowed origin, and that both devices share a trusted LAN. Do not disable browser security, ignore certificate warnings, or expose the bridge to the internet.</p>
+    <p>This viewer has no analytics, third-party scripts, uploads, recording, credential storage, audio, or microphone access. Video stays between the Android bridge and this browser. The parked checkbox is your confirmation; this page does not detect vehicle speed.</p>
+    <p><a href="https://groups.google.com/a/chromium.org/g/blink-dev/c/O6GMKt44Ups" target="_blank" rel="noopener noreferrer">Chrome’s local WebSocket requirements</a></p>
+  </details>
+  <noscript><p class="warning">JavaScript and WebCodecs are required. No connection has been started.</p></noscript>
+  <footer>Independent experimental project. Not affiliated with or endorsed by Apple or any vehicle manufacturer.</footer>
+</main>
+</body>
+</html>
