@@ -4,7 +4,10 @@ import { MAX_DECODE_QUEUE, parseConfig, parseEndpoint, parseVideoPacket } from '
 // backpressure are tested without a network, browser, or real accessory identity.
 export class BrowserSession {
   constructor({ WebSocket, VideoDecoder, EncodedVideoChunk, onState, onFrame,
-    now = () => performance.now(), setTimer = setTimeout, clearTimer = clearTimeout }) {
+    now = () => performance.now(),
+    // Window timers require their host receiver, not this BrowserSession.
+    setTimer = (callback, delay) => globalThis.setTimeout(callback, delay),
+    clearTimer = id => globalThis.clearTimeout(id) }) {
     Object.assign(this, { WebSocket, VideoDecoder, EncodedVideoChunk, onState, onFrame, now, setTimer, clearTimer });
     this.socket = null;
     this.decoder = null;
