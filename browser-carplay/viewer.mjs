@@ -1,5 +1,5 @@
 import { Contacts, fitRect, mapPointer, parseEndpoint } from './core.mjs';
-import { BrowserSession } from './session.mjs';
+import { BrowserSession } from './session.mjs?v=disconnect-diagnostics-1';
 
 const byId = id => document.getElementById(id);
 const form = byId('connection');
@@ -209,3 +209,4 @@ else window.addEventListener('resize', releaseContacts);
 status.textContent = blocked || 'Ready. Confirm you are parked, then enter the bridge details to connect.';
 indicator.dataset.state = blocked ? 'error' : 'closed';
 updateControls();
+

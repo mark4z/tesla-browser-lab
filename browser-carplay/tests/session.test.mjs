@@ -284,3 +284,46 @@ test('authentication and connection timeout callbacks close the one active sessi
   assert.equal(h.timers.size, 0);
   assert.equal(h.sockets.length, 1);
 });
+
+
+test('close diagnostics report numeric code and pairing phase without server contents', () => {
+  const h = harness();
+  const socket = h.connect();
+  socket.end(1002);
+  assert.match(h.states.at(-1).message, /WebSocket 1002; during pairing/);
+  assert.doesNotMatch(h.states.at(-1).message, /MUST NOT BE DISPLAYED|synthetic-test-token/);
+});
+
+test('error waits briefly for the close code rather than hiding it', async () => {
+  const h = harness();
+  const socket = await h.ready();
+  socket.receive(packet());
+  h.decoders[0].emit();
+  socket.onerror();
+  assert.equal(h.session.closed, false);
+  assert.equal([...h.timers.values()][0].delay, 1000);
+  socket.end(1006);
+  assert.equal(h.session.closed, true);
+  assert.equal(h.timers.size, 0);
+  assert.match(h.states.at(-1).message, /WebSocket 1006; streaming video/);
+});
+
+test('error without a close event terminates after a bounded wait', () => {
+  const h = harness();
+  const socket = h.connect();
+  socket.onerror();
+  [...h.timers.values()][0].callback();
+  assert.equal(h.session.closed, true);
+  assert.match(h.states.at(-1).message, /during pairing; no close code/);
+  assert.equal(socket.onclose, null);
+});
+
+test('close diagnostics do not reflect arbitrary values and reset on reconnect', async () => {
+  const h = harness();
+  const socket = await h.ready();
+  socket.end('untrusted-code');
+  assert.match(h.states.at(-1).message, /WebSocket unknown; waiting for video/);
+  assert.doesNotMatch(h.states.at(-1).message, /untrusted-code/);
+  h.connect().end(1008);
+  assert.match(h.states.at(-1).message, /rejected this session.*WebSocket 1008; during pairing/);
+});

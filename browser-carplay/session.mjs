@@ -33,7 +33,7 @@ export class BrowserSession {
     this.streaming = false;
     this.lastKeyframeRequest = -Infinity;
     this.consecutiveRecoveries = 0;
-    this.onState('connecting', 'Connecting. Allow local-network access only if you trust this network.');
+    this.reportState('connecting', 'Connecting. Allow local-network access only if you trust this network.');
     let socket;
     try {
       socket = new this.WebSocket(endpoint);
@@ -58,7 +58,7 @@ export class BrowserSession {
         token = '';
         socket.onopen = null;
       }
-      this.onState('authenticating', 'Connected to the bridge. Checking the temporary pairing token…');
+      this.reportState('authenticating', 'Connected to the bridge. Checking the temporary pairing token…');
       this.armTimeout(10000, 'Pairing timed out. Check the token and allowed website origin in DiPlay.');
     };
     socket.onmessage = event => {
@@ -67,7 +67,10 @@ export class BrowserSession {
       else this.receiveVideo(event.data);
     };
     socket.onerror = () => {
-      if (current()) this.close('Connection failed. Check the LAN permission, endpoint, and allowed website origin in DiPlay.', true);
+      // A CloseEvent normally follows error and carries the useful numeric code.
+      // Bound the wait for implementations that never deliver that event.
+      if (current()) this.armTimeout(1000,
+        `Connection failed (${this.phaseLabel()}; no close code). Check the LAN permission, endpoint, and allowed website origin in DiPlay.`);
     };
     socket.onclose = event => {
       token = '';
@@ -75,8 +78,21 @@ export class BrowserSession {
       const message = event.code === 1008
         ? 'The bridge rejected this session. Check the temporary token, allowed origin, and parked-use settings.'
         : 'The bridge disconnected. Re-enter the token and click Connect when you are ready.';
-      this.close(message, event.code !== 1000);
+      const code = Number.isInteger(event.code) && event.code >= 1000 && event.code <= 4999
+        ? String(event.code) : 'unknown';
+      this.close(`${message} (WebSocket ${code}; ${this.phaseLabel()}.)`, event.code !== 1000);
     };
+  }
+
+  reportState(state, message) {
+    this.phase = state;
+    this.onState(state, message);
+  }
+
+  phaseLabel() {
+    return ({ connecting: 'before pairing', authenticating: 'during pairing',
+      configuring: 'checking video codec', waiting: 'waiting for video',
+      live: 'streaming video', recovering: 'recovering video' })[this.phase] || 'session active';
   }
 
   armTimeout(delay, message) {
@@ -94,14 +110,14 @@ export class BrowserSession {
       this.authenticated = true;
       this.clearTimer(this.timeout);
       this.timeout = null;
-      this.onState('waiting', 'Paired. Waiting for CarPlay video on the Android bridge…');
+      this.reportState('waiting', 'Paired. Waiting for CarPlay video on the Android bridge…');
     } else if (message.type === 'config' && this.authenticated) {
       void this.configure(message);
     } else if (message.type === 'error') {
       this.close('The bridge could not continue this session. Check its status in DiPlay.', true);
     } else if (message.type === 'status' && this.authenticated && ['waiting', 'disconnected'].includes(message.code)) {
       this.clearDecoder();
-      this.onState('waiting', 'Paired. Waiting for CarPlay video on the Android bridge…');
+      this.reportState('waiting', 'Paired. Waiting for CarPlay video on the Android bridge…');
     } else {
       this.close('The bridge sent an unexpected control message.', true);
     }
@@ -110,7 +126,7 @@ export class BrowserSession {
   async configure(message) {
     this.clearDecoder();
     const version = this.configVersion;
-    this.onState('configuring', 'Checking support for the bridge’s video codec…');
+    this.reportState('configuring', 'Checking support for the bridge’s video codec…');
     try {
       const config = parseConfig(message);
       const streamId = message.streamId;
@@ -123,7 +139,7 @@ export class BrowserSession {
       this.config = config;
       this.streamId = streamId;
       this.makeDecoder();
-      this.onState('waiting', 'Ready for video. Waiting for a complete keyframe…');
+      this.reportState('waiting', 'Ready for video. Waiting for a complete keyframe…');
       this.requestKeyframe();
     } catch {
       if (!this.closed && version === this.configVersion) this.close('The bridge’s video configuration is unsupported or invalid.', true);
@@ -141,7 +157,7 @@ export class BrowserSession {
         this.consecutiveRecoveries = 0;
         if (!this.streaming) {
           this.streaming = true;
-          this.onState('live', 'Live display. Touch control is optional and starts off.');
+          this.reportState('live', 'Live display. Touch control is optional and starts off.');
         }
         try { this.onFrame(frame); } catch { frame.close(); this.close('The browser could not draw the video frame.', true); }
       },
@@ -178,7 +194,7 @@ export class BrowserSession {
     }
     try {
       this.makeDecoder();
-      this.onState('recovering', 'Resynchronizing video. Waiting for a fresh keyframe…');
+      this.reportState('recovering', 'Resynchronizing video. Waiting for a fresh keyframe…');
       this.requestKeyframe();
     } catch {
       this.close('The browser could not restart its video decoder.', true);
