@@ -1,3 +1,4 @@
+import { AUDIO_TRANSPORT, positiveId, validAudioSdp, validAudioCandidate } from './audio-protocol.mjs?v=webrtc-audio-v1';
 import { MAX_DECODE_QUEUE, parseConfig, parseEndpoint, parseVideoPacket } from './core.mjs?v=browser-av-v3';
 import { ConnectionDiagnostics } from './diagnostics.mjs?v=connection-diag-v1';
 
@@ -171,7 +172,7 @@ export class BrowserSession {
       this.touchPending = false;
       if (!message.enabled) this.touchRequested = false;
       this.reportTouchOwnership();
-    } else if (['audioState', 'audioStopped', 'audioError'].includes(message.type)) {
+    } else if (['audioOffer', 'audioIce', 'audioState', 'audioStopped', 'audioError'].includes(message.type)) {
       this.onAudioMessage(message);
     } else if (message.type === 'status' && ['waiting', 'disconnected'].includes(message.code)) {
       this.clearDecoder();
@@ -358,9 +359,19 @@ export class BrowserSession {
     catch { this.close('The local bridge connection was lost.', true); return false; }
   }
 
-  setAudioEnabled(enabled, requestId) {
-    return typeof enabled === 'boolean' && Number.isSafeInteger(requestId) && requestId > 0 &&
-      this.send({ type: 'audioMode', enabled, requestId });
+  setAudioEnabled(enabled, requestId, source) {
+    return typeof enabled === 'boolean' && positiveId(requestId) && (source === undefined || source === 'test') &&
+      this.send({ type: 'audioMode', enabled, requestId, transport: AUDIO_TRANSPORT, ...(enabled && source === 'test' ? { source } : {}) });
+  }
+
+  sendAudioSignal(message) {
+    if (!message || !positiveId(message.requestId) || !positiveId(message.epoch) || message.transport !== AUDIO_TRANSPORT) return false;
+    if (message.type === 'audioAnswer') {
+      if (!validAudioSdp(message.sdp, 'recvonly')) return false;
+    } else if (message.type === 'audioIce') {
+      if (!validAudioCandidate(message)) return false;
+    } else if (!['audioReady', 'audioAlive'].includes(message.type)) return false;
+    return this.send(message);
   }
 
   suspendTouch(preserveIntent) {

@@ -37,11 +37,12 @@ offer an HTTP/codec-library workaround. HEVC support is device-dependent.
    match the existing CarPlay HID mapper.
 
 Click **Play audio here** after approval to move sound to the browser. A successful
-user-gesture Web Audio start is required. Stopping browser audio, hiding the page,
+user-gesture WebRTC audio start is required. **Test audio (3 seconds)** can check a short synthetic downlink after approval, even without a CarPlay source; it never mutes Android. Stopping browser audio, hiding the page,
 or disconnecting returns playback to Android.
 
-The LAN link is **unencrypted**, including video, audio, and touch controls. Use only a
-trusted network. Do not expose the bridge to the internet. The viewer has no
+The LAN WebSocket is **unencrypted**, including video, audio signaling, and touch
+controls. Audio media uses WebRTC DTLS-SRTP encryption, but its signaling still
+depends on the trusted LAN and Android approval. Use only a trusted network. Do not expose the bridge to the internet. The viewer has no
 pairing credentials, persistent approvals, or raw network-data logging. HTTPS
 secures page delivery, not the local transport.
 
@@ -55,8 +56,9 @@ not a vehicle-speed sensor.
 
 The visible **Connection diagnostics** panel shows page scheme, secure-context
 status, and the actual connection target’s `ws://` transport separately. HTTPS
-protects this page’s delivery; it does not encrypt video, audio, or controls on
-the plaintext LAN WebSocket. These labels describe transport, not a browser
+protects this page’s delivery; it does not encrypt video, audio signaling, or
+controls on the plaintext LAN WebSocket. Audio media is separately protected by
+WebRTC DTLS-SRTP. These labels describe transport, not a browser
 permission verdict or a promise that a connection will work.
 
 Every valid, user-initiated Connect starts a fresh in-memory timeline:
@@ -208,62 +210,95 @@ including `[]` for final release. The bridge must synthesize releases and clear
 all native contacts if the connection closes. Slow outbound control links close
 instead of accumulating stale moves or dropping a release.
 
-## Optional browser audio
+## Optional WebRTC/Opus browser audio
 
-Audio remains on Android by default. A user gesture creates/resumes an AudioContext,
-loads the same-origin AudioWorklet, and only then sends:
+Audio remains on Android by default. A click on **Play audio here** creates one
+`RTCPeerConnection` with `iceServers: []`, a receive-only audio transceiver, and an
+unmuted audio element. Its `play()` call starts synchronously inside the gesture.
+There is no browser microphone request, capture API, recording, AudioWorklet,
+WebSocket PCM transport, custom jitter buffer, or automatic audio reconnect.
+WebRTC supplies Opus decoding, packet-loss concealment, and jitter handling.
+The existing AVC/HEVC WebCodecs video path is unchanged and separately timed.
+No end-to-end latency or A/V synchronization guarantee is made.
+
+Audio signaling travels only over the approved protocol-v2 WebSocket:
 
 ```json
-{"type":"audioMode","enabled":true,"requestId":1}
+{"type":"audioMode","enabled":true,"requestId":1,"transport":"webrtc-opus"}
+{"type":"audioOffer","requestId":1,"epoch":2,"transport":"webrtc-opus","sdp":"..."}
+{"type":"audioAnswer","requestId":1,"epoch":2,"transport":"webrtc-opus","sdp":"..."}
+{"type":"audioIce","requestId":1,"epoch":2,"transport":"webrtc-opus","candidate":"candidate:...","sdpMid":"0","sdpMLineIndex":0}
+{"type":"audioReady","requestId":1,"epoch":2,"transport":"webrtc-opus"}
+{"type":"audioState","enabled":true,"requestId":1,"epoch":2,"transport":"webrtc-opus"}
+{"type":"audioAlive","requestId":1,"epoch":2,"transport":"webrtc-opus"}
+{"type":"audioMode","enabled":false,"requestId":1,"transport":"webrtc-opus"}
 ```
 
-The positive safe request ID is monotonic for the player lifetime. Android echoes
-it in `audioState` with boolean `enabled` and a positive `epoch`; only the current
-request can activate playback. A mismatched reply cannot cancel a later request.
-Unsolicited disabled states revoke playback. A five-second handoff deadline restores
-Android output. Disabled state, tab hide, socket close, and audio-context suspension
-clear PCM and restore native playback. Nothing is stored, and a new connection
-requires another audio-button click. Audio does not request microphone permission.
+Android offers exactly one send-only DTLS/Opus audio section. The browser answers
+receive-only, requests Opus `stereo=1`, and never creates a video/data/microphone
+track. ICE is host-only: RFC1918 IPv4, loopback/link-local, IPv6 ULA/link-local, or
+bounded `.local` mDNS names. Public-interface candidates are not signaled. No
+STUN/TURN server or internet relay is configured. Both endpoints need a mutually
+reachable trusted local network; client isolation, firewalls, mDNS, and browser
+policy can prevent ICE connectivity. There is no insecure transport fallback.
 
-The existing Android AAC/Opus/LPCM renderer exports signed 16-bit little-endian PCM.
-This uses the actual decoder output sample rate/channels/encoding; unsupported PCM
-reports a fixed error and keeps native output. Native AudioTracks continue pacing
-while muted for browser playback. Per-renderer focus gain is included in packets.
-No AAC/Opus browser decoder support is required. PCM bandwidth at 48kHz stereo is
-about 1.54 Mbit/s before transport overhead.
+`requestId` advances on each user-initiated audio attempt. A disable refers to that
+same attempt. Android assigns a positive route `epoch`; offer/answer, trickle ICE,
+readiness, liveness, and state must match the current request and epoch. ICE arriving
+before its offer is bounded and held until remote SDP is accepted. Delayed promises,
+old callbacks, and stale acknowledgments cannot revive or stop a newer route.
+SDP is ASCII and at most 6,000 characters; candidates are at most 1,024 characters,
+with at most 32 candidates in each direction and 64 incoming controls per attempt.
 
-Binary kind 3 uses this self-describing 36-byte header (big-endian metadata):
+The browser sends `audioReady` only when it has answered the offer, ICE is connected,
+a live audio track exists, the audio element's playback promise succeeded, and
+inbound audio RTP packets increased across successive stats polls, and the selected
+ICE pair is verified as host-to-host with local literal or mDNS addresses. Missing
+or privacy-redacted addresses cannot establish this local-only proof; audio stays
+on Android with an explanation rather than weakening the check. Android keeps
+native output on until its own peer is connected and this matching readiness is
+accepted, then confirms `audioState enabled:true`. A pre-readiness enabled ACK or
+legacy PCM audio request/response fails closed with APK/viewer upgrade guidance.
+No fallback to the old PCM WebSocket pipeline is attempted.
 
-| Offset | Value |
-| --- | --- |
-| 0 | 3 (audio) |
-| 1 | envelope version 1 |
-| 2 | encoding 1 (PCM16 little-endian) |
-| 3 | channels, 1 or 2 |
-| 4–7 | route epoch |
-| 8–11 | per-route stream ID |
-| 12–15 | sample rate, 8000–192000 Hz |
-| 16–23 | first PCM sample-frame counter |
-| 24–27 | frame count, 1–4096 |
-| 28–31 | float32 gain, 0–1 |
-| 32 | discontinuity flag bit 0; remaining bits reserved |
-| 33–35 | reserved zero |
-| 36 onward | interleaved signed PCM16 samples |
+Negotiation has a 15-second deadline; a ready browser waits at most five seconds
+for Android's acknowledgment. While active, the browser sends `audioAlive` at most
+once per second, only with new RTP progress. A three-second RTP stall, paused/muted
+output, ended track, failed/disconnected ICE, explicit stop, or tab hide returns
+playback to Android. Android also has a four-second liveness watchdog in case the
+browser's timers are suspended. Disconnect/source replacement closes the route.
+Video-only recovery does not alter a healthy audio route. New sockets need fresh
+Android approval and a new audio-button click.
 
-Gaps in sample counters reset a stream’s playout queue. `audioStopped` carries
-`epoch`, `streamId`, and `lastSample`, so prioritized control does not discard valid
-tail PCM. Epochs prevent older routes from playing; transport callbacks are bound
-to the exact approved socket so old workers cannot send to a replacement viewer.
+**Test audio (3 seconds)** sends the same enable with `"source":"test"`. It works
+after Android approval without active CarPlay media. Android emits a finite quiet
+440 Hz test tone through the same WebRTC/Opus route, never mutes native playback,
+and closes with `audioState enabled:false` / `code:"test-complete"`. The browser
+shows this as a completed test. It is never launched automatically.
 
-PCM has a four-packet producer queue, a separate eight-packet/64KiB LAN queue
-(including in-flight bytes), and at most eight messages/64KiB awaiting worklet
-credits. The worklet mixes up to eight streams with at most 160ms of PCM per stream,
-resampling to the AudioContext rate. Old PCM is shed under pressure; video references
-are handled separately through keyframe recovery. Control goes first, with fair
-alternation of ready audio and video. Native/source buffering and browser/network
-buffers add latency; no fixed end-to-end latency or A/V synchronization is claimed.
-Music, navigation, prompts, and call downlink require parked hardware validation;
-this does not implement browser microphone/call uplink.
+For parked manual validation:
+
+1. Connect and approve Android, then run **Test audio (3 seconds)**. Confirm the
+   tone and automatic return to native mode; verify Android stayed audible.
+2. Start CarPlay music and choose **Play audio here**. Verify native output is
+   muted only after the browser starts receiving; listen for correct stereo.
+3. Test stop/start, visibility changes, Wi-Fi loss, source replacement, and a
+   stalled browser. Confirm Android resumes and no stale audio is replayed.
+4. Exercise navigation/prompt mixing and longer playback alongside unchanged
+   HEVC video. Real output quality, loss behavior, latency, and A/V timing require
+   the intended browser/Android/accessory hardware; unit tests do not establish them.
+
+A bounded read-only snapshot can be retrieved in the console with:
+
+```js
+(await import('./viewer.mjs?v=webrtc-audio-v1')).getAudioDiagnostics()
+```
+
+It includes packet count, jitter in milliseconds, concealed sample count, and
+selected candidate-pair types/protocol when the browser supplies those stats.
+It never exposes IP addresses, SDP, raw candidate strings, tokens, or media.
+Missing stats are `null`, not proof that ICE failed. Counters remain only in page
+memory, reset for the next attempt, and are neither logged nor uploaded.
 
 ## Validation
 
@@ -274,6 +309,8 @@ node --test site/browser-carplay/tests/*.test.mjs
 node --check site/browser-carplay/viewer.mjs
 node --check site/browser-carplay/session.mjs
 node --check site/browser-carplay/diagnostics.mjs
+node --check site/browser-carplay/audio.mjs
+node --check site/browser-carplay/audio-protocol.mjs
 ```
 
 The dependency-free tests exercise strict endpoint validation, framing, codec
@@ -283,6 +320,9 @@ backpressure, recovery, and explicit reconnect. Diagnostic tests cover exact
 milestone times, pre-open failure, rejection, timeout, received-versus-local close
 codes, deduplication across video recovery, stale callbacks, privacy-safe output,
 bounded retention, new-attempt reset, and absence of automatic HTTP health probes.
+Audio tests cover readiness ordering, Opus stereo negotiation, local ICE/size/count
+bounds, legacy fail-closed behavior, delayed promises, repeated/cancelled gestures,
+RTP liveness, explicit test tone signaling, privacy-safe stats, and native fallback.
 They use synthetic bytes and identifiers only. Real HTTPS-to-LAN browser permission,
 hardware AVC/HEVC decoding, physical two-finger gestures, background suspension,
 and CarPlay hardware integration still require a parked-device test.

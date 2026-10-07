@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { BrowserSession } from '../session.mjs';
 import { MAX_DECODE_QUEUE } from '../core.mjs';
+import { audioSdp, candidate } from './audio-fixtures.mjs';
 
 const CONFIG = { type: 'config', streamId: 1, codec: 'avc1.64001f', width: 1280, height: 720 };
 const ENDPOINT = 'ws://192.168.1.20:8765/carplay';
@@ -651,7 +652,7 @@ test('audio is approval-gated and independent of video recovery on the same sock
   h.session.onAudioReset = () => { resets++; };
   const socket = await h.ready();
   assert.equal(h.session.setAudioEnabled(true, 1), true);
-  assert.deepEqual(socket.sent.at(-1), { type: 'audioMode', enabled: true, requestId: 1 });
+  assert.deepEqual(socket.sent.at(-1), { type: 'audioMode', enabled: true, requestId: 1, transport: 'webrtc-opus' });
   socket.receive({ type: 'audioState', enabled: true, epoch: 1 });
   socket.receive(audio);
   assert.equal(packets[0], audio);
@@ -749,4 +750,21 @@ test('diagnostics cannot turn approval rejection into success or invent a receiv
   assert.equal(h.session.authenticated, false);
   assert.equal(h.sockets.length, 1);
   assert.doesNotMatch(JSON.stringify(h.diagnostics), /secret/);
+});
+
+
+test('WebRTC signaling stays approval-gated, audio-only and separate from video configuration', async () => {
+  const h = harness(), messages = []; h.session.onAudioMessage = message => messages.push(message);
+  const answer = { type: 'audioAnswer', transport: 'webrtc-opus', requestId: 1, epoch: 1, sdp: audioSdp('recvonly') };
+  const socket = h.connect(); assert.equal(h.session.sendAudioSignal(answer), false); approve(socket);
+  assert.equal(h.session.setAudioEnabled(true, 1, 'test'), true); assert.equal(socket.sent.at(-1).source, 'test');
+  socket.receive({ type: 'audioOffer', requestId: 1, epoch: 1, transport: 'webrtc-opus', sdp: audioSdp('sendonly') });
+  socket.receive({ type: 'audioIce', requestId: 1, epoch: 1, transport: 'webrtc-opus', ...candidate });
+  assert.deepEqual(messages.map(message => message.type), ['audioOffer', 'audioIce']);
+  assert.equal(h.session.sendAudioSignal(answer), true);
+  for (const invalid of [{ ...answer, type: 'offer' }, { ...answer, transport: 'pcm' }, { ...answer, epoch: 0 },
+    { ...answer, sdp: audioSdp('sendrecv') }, { ...answer, type: 'audioIce', ...candidate, sdpMLineIndex: 1 }])
+    assert.equal(h.session.sendAudioSignal(invalid), false);
+  assert.equal(h.session.sendAudioSignal({ type: 'audioAlive', requestId: 1, epoch: 1, transport: 'webrtc-opus' }), true);
+  assert.equal(h.decoders.length, 0, 'synthetic test needs no video or CarPlay configuration'); h.session.close();
 });

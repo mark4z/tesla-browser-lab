@@ -1,6 +1,6 @@
 import { Contacts, fitRect, mapPointer } from './core.mjs?v=browser-av-v3';
-import { BrowserSession } from './session.mjs?v=connection-diag-v1';
-import { BrowserAudioPlayer } from './audio.mjs?v=browser-av-v3';
+import { BrowserSession } from './session.mjs?v=webrtc-audio-v1';
+import { BrowserAudioPlayer } from './audio.mjs?v=webrtc-audio-v1';
 import { milestoneText, transportCaption } from './diagnostics.mjs?v=connection-diag-v1';
 
 const byId = id => document.getElementById(id);
@@ -11,6 +11,7 @@ const parked = byId('parked');
 const touch = byId('touch');
 const touchStatus = byId('touch-status');
 const audioButton = byId('audio');
+const audioTestButton = byId('audio-test');
 const audioStatus = byId('audio-status');
 const connect = byId('connect');
 const disconnect = byId('disconnect');
@@ -68,7 +69,8 @@ const session = new BrowserSession({ WebSocket, VideoDecoder: window.VideoDecode
   onAudioPacket: packet => audioPlayer?.handlePacket(packet),
   onAudioReset: () => audioPlayer?.reset() });
 audioPlayer = new BrowserAudioPlayer({
-  sendMode: (enabled, requestId) => session.setAudioEnabled(enabled, requestId),
+  sendMode: (enabled, requestId, source) => session.setAudioEnabled(enabled, requestId, source),
+  sendSignal: message => session.sendAudioSignal(message),
   onState: state => {
     audioState = state;
     audioStatus.textContent = state.message;
@@ -76,12 +78,16 @@ audioPlayer = new BrowserAudioPlayer({
   },
 });
 
+// Read-only, bounded operational counters for parked manual validation.
+export const getAudioDiagnostics = () => audioPlayer.getDiagnostics();
+
 function updateControls() {
   const active = !session.closed;
   connect.disabled = Boolean(blocked) || active || !parked.checked;
   disconnect.disabled = !active;
   ip.disabled = port.disabled = active;
   audioButton.disabled = !session.authenticated || !active || !parked.checked;
+  audioTestButton.disabled = audioButton.disabled || audioState.pending || audioState.enabled;
   audioButton.textContent = audioState.pending ? 'Cancel audio start'
     : (audioState.enabled ? 'Return audio to Android' : 'Play audio here');
   touch.disabled = (!live && !session.touchRequested) || !parked.checked || active === false || !window.PointerEvent;
@@ -219,6 +225,11 @@ audioButton.addEventListener('click', () => {
   else void audioPlayer.enableFromGesture();
 });
 
+audioTestButton.addEventListener('click', () => {
+  if (!session.authenticated || session.closed || !parked.checked || document.visibilityState !== 'visible') return;
+  void audioPlayer.enableFromGesture({ test: true });
+});
+
 touch.addEventListener('change', () => {
   if (!parked.checked || (!live && touch.checked)) touch.checked = false;
   releaseContacts();
@@ -226,10 +237,10 @@ touch.addEventListener('change', () => {
   canvas.classList.toggle('touch-enabled', session.touchOwned);
 });
 parked.addEventListener('change', () => {
-  if (!parked.checked) { releaseContacts(); session.close('Disconnected. Park safely before connecting again.'); }
+  if (!parked.checked) { audioPlayer.disable(); releaseContacts(); session.close('Disconnected. Park safely before connecting again.'); }
   updateControls();
 });
-disconnect.addEventListener('click', () => { releaseContacts(); session.close(); });
+disconnect.addEventListener('click', () => { audioPlayer.disable(); releaseContacts(); session.close(); });
 form.addEventListener('submit', event => {
   event.preventDefault();
   if (blocked || !parked.checked || !session.closed || document.visibilityState !== 'visible') return;
@@ -244,6 +255,7 @@ form.addEventListener('submit', event => {
 });
 
 function leavePage() {
+  audioPlayer.disable();
   releaseContacts();
   session.close('Disconnected because this page is no longer visible. Click Connect to request approval again.');
   parked.checked = touch.checked = false;

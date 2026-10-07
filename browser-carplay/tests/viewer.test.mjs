@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { audioEnvironment, audioSdp, flush } from './audio-fixtures.mjs';
 
 // Minimal DOM/WebCodecs stubs exercise the actual page module's event wiring.
 // This supplements (not replaces) a real browser/hardware acceptance test.
-test('viewer requires explicit connection/touch and releases frames/contacts on interrupted flows', async () => {
+test('viewer requires explicit connection/touch and releases frames/contacts on interrupted flows', async t => {
   class Events {
     constructor() { this.listeners = new Map(); }
     addEventListener(name, handler) { const handlers = this.listeners.get(name) || []; handlers.push(handler); this.listeners.set(name, handlers); }
@@ -28,11 +29,11 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
     releasePointerCapture(id) { captured.delete(id); this.dispatch('lostpointercapture', { pointerId: id }); }
   }
   const elements = Object.fromEntries(['connection', 'ip', 'port', 'parked', 'touch', 'connect', 'disconnect',
-    'video', 'viewport', 'placeholder', 'status', 'indicator', 'origin', 'touch-status', 'audio', 'audio-status',
+    'video', 'viewport', 'placeholder', 'status', 'indicator', 'origin', 'touch-status', 'audio', 'audio-test', 'audio-status',
     'connection-timeline', 'connection-attempt', 'connection-transport'].map(id => [id, new Element()]));
   elements.parked.checked = true;
   elements.touch.checked = true;
-  const document = Object.assign(new Events(), { visibilityState: 'visible', getElementById: id => elements[id], createElement: () => new Element() });
+  const document = Object.assign(new Events(), { visibilityState: 'visible', getElementById: id => elements[id], createElement: kind => kind === 'audio' ? audioEnv.dependencies.createAudio() : new Element() });
   const sockets = [], decoders = [], raf = new Map();
   let rafId = 0, fetches = 0;
   class Socket {
@@ -52,22 +53,19 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
       this.output(frame); return frame;
     }
   }
-  const audioContexts = [];
-  class AudioContext {
-    constructor() { this.state = 'suspended'; this.destination = {}; this.audioWorklet = { addModule: async () => {} }; audioContexts.push(this); }
-    async resume() { this.state = 'running'; }
-    async close() { this.state = 'closed'; }
-  }
-  class AudioWorkletNode {
-    constructor() { this.port = { postMessage() {}, close() {} }; }
-    connect() {}
-    disconnect() {}
-  }
+  const audioEnv = audioEnvironment(), audioPeers = audioEnv.peers;
+  const timers = new Map(); let nextTimer = 0;
+  t.mock.method(globalThis, 'setTimeout', (callback, delay) => { timers.set(++nextTimer, { callback, delay }); return nextTimer; });
+  t.mock.method(globalThis, 'clearTimeout', id => timers.delete(id));
+  const audioTick = async () => {
+    const [id, timer] = [...timers].find(([, value]) => value.delay === 250);
+    timers.delete(id); timer.callback(); await flush();
+  };
   const window = Object.assign(new Events(), { VideoDecoder: Decoder, EncodedVideoChunk: class {}, PointerEvent: class {}, ResizeObserver: class { observe() {} } });
   window.top = window.self = window;
   Object.assign(globalThis, { document, window, location: { protocol: 'https:', origin: 'https://viewer.example' }, isSecureContext: true,
     VideoDecoder: Decoder, EncodedVideoChunk: window.EncodedVideoChunk, WebSocket: Socket, ResizeObserver: window.ResizeObserver,
-    devicePixelRatio: 1, AudioContext, AudioWorkletNode,
+    devicePixelRatio: 1, RTCPeerConnection: audioEnv.dependencies.PeerConnection, MediaStream: audioEnv.dependencies.MediaStream,
     fetch: () => { fetches++; throw new Error('The viewer must not fetch an HTTP health probe.'); },
     requestAnimationFrame: callback => { raf.set(++rafId, callback); return rafId; }, cancelAnimationFrame: id => raf.delete(id) });
   Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userAgent: 'Chrome/154.0.0.0' } });
@@ -76,9 +74,9 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
   await import('../viewer.mjs?ui-test');
 
   assert.equal(sockets.length, 0, 'page load must not connect');
-  assert.equal(audioContexts.length, 0, 'page load must not create an AudioContext');
+  assert.equal(audioPeers.length, 0, 'page load must not create a peer connection');
   elements.audio.dispatch('click');
-  assert.equal(audioContexts.length, 0, 'preapproval cannot start audio');
+  assert.equal(audioPeers.length, 0, 'preapproval cannot start audio');
   assert.equal(elements.parked.checked, false, 'restored parked state is not fresh consent');
   assert.equal(elements.touch.checked, false);
   assert.equal(elements.connect.disabled, true);
@@ -128,14 +126,27 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
   elements.video.dispatch('pointerdown', pointer(100));
   assert.equal(socket.sent.some(m => m.type === 'touch'), false, 'video must not implicitly enable touch');
 
+  elements['audio-test'].dispatch('click'); await flush();
+  assert.equal(socket.sent.at(-1).source, 'test');
+  assert.equal(elements['audio-test'].disabled, true);
   elements.audio.dispatch('click');
-  for (let i = 0; i < 5; i++) await Promise.resolve();
+  assert.equal(socket.sent.at(-1).enabled, false);
+  assert.equal(audioPeers[0].closed, true, 'cancelling a test releases its peer');
+  elements.audio.dispatch('click'); await flush();
   const audioRequest = socket.sent.findLast(message => message.type === 'audioMode');
   assert.equal(audioRequest.enabled, true);
+  assert.equal(audioRequest.transport, 'webrtc-opus');
   assert.ok(Number.isSafeInteger(audioRequest.requestId));
-  socket.receive({ type: 'audioState', enabled: true, epoch: 10, requestId: audioRequest.requestId });
+  socket.receive({ type: 'audioOffer', transport: 'webrtc-opus', epoch: 10, requestId: audioRequest.requestId, sdp: audioSdp('sendonly') });
+  await flush();
+  audioPeers.at(-1).emitTrack(); audioPeers.at(-1).connect();
+  audioPeers.at(-1).packets = 1; await audioTick();
+  audioPeers.at(-1).packets = 2; await audioTick();
+  assert.equal(socket.sent.at(-1).type, 'audioReady');
+  assert.equal(elements.audio.textContent, 'Cancel audio start');
+  socket.receive({ type: 'audioState', transport: 'webrtc-opus', enabled: true, epoch: 10, requestId: audioRequest.requestId });
   assert.equal(elements.audio.textContent, 'Return audio to Android');
-  assert.equal(audioContexts.length, 1);
+  assert.equal(audioPeers.length, 2);
 
   elements.touch.checked = true;
   elements.touch.dispatch('change');
@@ -206,7 +217,7 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
   decoders.at(-1).emit();
   paint();
   assert.equal(elements.touch.checked, true, 'same approved socket retains explicit opt-in');
-  assert.equal(audioContexts[0].state, 'running', 'benign video recovery leaves audio running');
+  assert.equal(audioPeers.at(-1).closed, false, 'benign video recovery leaves audio running');
   assert.equal(elements.audio.textContent, 'Return audio to Android');
   assert.equal(elements.video.classes.has('touch-enabled'), false, 'new generation still needs a matching ACK');
   const resumedTouch = socket.sent.at(-1);
@@ -220,8 +231,9 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
   document.dispatch('visibilitychange');
   assert.equal(cancelled.closes, 1, 'pending frame is closed on hide');
   assert.equal(socket.readyState, 3);
-  assert.equal(audioContexts[0].state, 'closed', 'tab hide closes audio');
+  assert.equal(audioPeers.at(-1).closed, true, 'tab hide closes audio');
   assert.equal(elements.audio.disabled, true);
+  assert.equal(socket.sent.findLast(message => message.type === 'audioMode').enabled, false, 'tab hide sends explicit fallback before closing');
   assert.equal(elements.audio.textContent, 'Play audio here');
   assert.equal(elements.placeholder.hidden, false);
   assert.equal(elements.parked.checked, false);
