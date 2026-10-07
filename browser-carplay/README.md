@@ -51,6 +51,49 @@ video reconfiguration, and resize. On reconnect, click Connect, accept again on
 Android, and explicitly enable touch again. The checkbox is a user declaration,
 not a vehicle-speed sensor.
 
+## Connection diagnostics and LAN checks
+
+The visible **Connection diagnostics** panel shows page scheme, secure-context
+status, and the actual connection target’s `ws://` transport separately. HTTPS
+protects this page’s delivery; it does not encrypt video, audio, or controls on
+the plaintext LAN WebSocket. These labels describe transport, not a browser
+permission verdict or a promise that a connection will work.
+
+Every valid, user-initiated Connect starts a fresh in-memory timeline:
+
+1. **Connect requested**: endpoint validation passed and the attempt began.
+2. **WebSocket opened**: the browser reported a successful WebSocket handshake.
+3. **Android approval pending**: protocol-v2 `approvalPending` was received.
+4. **Approved on Android**: the required approval handshake completed.
+5. **First video decoded**: a usable video decoder output arrived. This marks
+   decoding, not a guarantee that a canvas draw or audio playback succeeded.
+6. **Connection ended**: includes the numeric CloseEvent code if one was observed.
+   Local cancellation, timeout, or early failure may have no close event code.
+
+Elapsed times are measured from Connect with a monotonic clock. The panel retains
+at most these six milestones for the latest attempt, including after disconnect.
+Recovery does not append per-frame entries, and a new Connect replaces the previous
+attempt. There are no raw server reasons, private IPs, tokens, SDP, media payloads,
+console logs, persistence, or diagnostic uploads. A close code identifies an
+observation, not a root cause: for example, **1006** means an abnormal closure with
+no normal close frame, not proof of a specific permission, origin, or LAN failure.
+
+To check the route independently, while parked manually navigate to the HTTP
+health URL shown by the diagnostic APK, for example
+`http://192.168.1.20:8765/health`. A successful response identifying
+`service=diplay-browser`, `protocol=2`, and `build=connection-diag-v1` shows that
+this browser reached that APK’s LAN HTTP endpoint. It does **not** prove that the
+HTTPS viewer has Local Network Access permission, that `/carplay` can complete a
+WebSocket handshake, or that the Android approval flow succeeded. Confirm the
+address matches the APK; do not bypass browser security or certificate warnings.
+
+The viewer never fetches, preflights, embeds, or auto-opens that HTTP endpoint from
+this HTTPS page. Such a cross-scheme fetch can be blocked as mixed content and
+must not be mistaken for a failed LAN route. Navigating away disconnects an active
+session; return to the HTTPS viewer and explicitly Connect again. An unavailable
+health endpoint alone can also mean an older APK; inspect the APK’s version and
+status rather than inferring a permission failure.
+
 ## Wire protocol
 
 One WebSocket client to `/carplay`. Protocol **v2** replaces token authentication
@@ -230,11 +273,16 @@ From the repository root, with Node 20+:
 node --test site/browser-carplay/tests/*.test.mjs
 node --check site/browser-carplay/viewer.mjs
 node --check site/browser-carplay/session.mjs
+node --check site/browser-carplay/diagnostics.mjs
 ```
 
 The dependency-free tests exercise strict endpoint validation, framing, codec
 configuration, letterbox geometry, stable contacts, approval/version gating,
-rejection/expiry, stale touch acknowledgments, timeouts, codec negotiation races, backpressure, recovery, and explicit reconnect.
+rejection/expiry, stale touch acknowledgments, timeouts, codec negotiation races,
+backpressure, recovery, and explicit reconnect. Diagnostic tests cover exact
+milestone times, pre-open failure, rejection, timeout, received-versus-local close
+codes, deduplication across video recovery, stale callbacks, privacy-safe output,
+bounded retention, new-attempt reset, and absence of automatic HTTP health probes.
 They use synthetic bytes and identifiers only. Real HTTPS-to-LAN browser permission,
 hardware AVC/HEVC decoding, physical two-finger gestures, background suspension,
 and CarPlay hardware integration still require a parked-device test.

@@ -1,4 +1,5 @@
 import { MAX_DECODE_QUEUE, parseConfig, parseEndpoint, parseVideoPacket } from './core.mjs?v=browser-av-v3';
+import { ConnectionDiagnostics } from './diagnostics.mjs?v=connection-diag-v1';
 
 export const PROTOCOL_VERSION = 2;
 const UPGRADE_ADVICE = 'Install the latest DiPlay APK and reload the updated browser viewer; both must support Android approval (protocol v2).';
@@ -13,12 +14,13 @@ const APPROVAL_ERRORS = {
 // backpressure are tested without a network, browser, or real accessory identity.
 export class BrowserSession {
   constructor({ WebSocket, VideoDecoder, EncodedVideoChunk, onState, onFrame,
-    onTouchOwnership = () => {}, onAudioMessage = () => {}, onAudioPacket = () => {}, onAudioReset = () => {},
+    onTouchOwnership = () => {}, onAudioMessage = () => {}, onAudioPacket = () => {}, onAudioReset = () => {}, onDiagnostics = () => {},
     now = () => performance.now(),
     // Window timers require their host receiver, not this BrowserSession.
     setTimer = (callback, delay) => globalThis.setTimeout(callback, delay),
     clearTimer = id => globalThis.clearTimeout(id) }) {
     Object.assign(this, { WebSocket, VideoDecoder, EncodedVideoChunk, onState, onFrame, onTouchOwnership, onAudioMessage, onAudioPacket, onAudioReset, now, setTimer, clearTimer });
+    this.diagnostics = new ConnectionDiagnostics({ now, onUpdate: onDiagnostics });
     this.socket = null;
     this.decoder = null;
     this.config = null;
@@ -51,6 +53,9 @@ export class BrowserSession {
     this.streaming = false;
     this.lastKeyframeRequest = -Infinity;
     this.consecutiveRecoveries = 0;
+    // parseEndpoint constructs the exact transport used below; retain its scheme
+    // only, never the private address or a full endpoint in diagnostics.
+    this.diagnostics.start(endpoint.startsWith('ws:') ? 'ws:' : null);
     this.reportState('connecting', 'Connecting. Allow local-network access only if you trust this network.');
     let socket;
     try {
@@ -67,6 +72,7 @@ export class BrowserSession {
     socket.onopen = () => {
       if (!current()) return;
       socket.onopen = null;
+      this.diagnostics.mark('wsOpen');
       try {
         socket.send(JSON.stringify({ type: 'requestApproval', version: PROTOCOL_VERSION }));
       } catch {
@@ -97,7 +103,7 @@ export class BrowserSession {
       else if (!this.authenticated) message += ` ${UPGRADE_ADVICE}`;
       const code = Number.isInteger(event.code) && event.code >= 1000 && event.code <= 4999
         ? String(event.code) : 'unknown';
-      this.close(`${message} (WebSocket ${code}; ${this.phaseLabel()}.)`, event.code !== 1000);
+      this.close(`${message} (WebSocket ${code}; ${this.phaseLabel()}.)`, event.code !== 1000, event.code);
     };
   }
 
@@ -135,6 +141,7 @@ export class BrowserSession {
       if (message.version !== PROTOCOL_VERSION) { this.close(UPGRADE_ADVICE, true); return; }
       if (message.type === 'approvalPending' && this.phase === 'requestingApproval' && !this.approvalPending) {
         this.approvalPending = true;
+        this.diagnostics.mark('approvalPending');
         // Do not restart the deadline: repeated messages cannot extend approval.
         this.reportState('approvalPending', 'Waiting for approval. Tap Accept in DiPlay on Android within 30 seconds.');
       } else if (message.type === 'authenticated' && this.approvalPending) {
@@ -142,6 +149,7 @@ export class BrowserSession {
         this.approvalPending = false;
         this.clearTimer(this.timeout);
         this.timeout = null;
+        this.diagnostics.mark('approved');
         this.reportState('waiting', 'Approved on Android. Waiting for CarPlay video…');
       } else {
         this.close(`The bridge did not complete the Android approval handshake. ${UPGRADE_ADVICE}`, true);
@@ -213,6 +221,7 @@ export class BrowserSession {
         this.videoTimeout = null;
         if (!this.streaming) {
           this.streaming = true;
+          this.diagnostics.mark('firstVideo');
           this.reportState('live', 'Live display. Touch control is optional.');
           if (this.touchRequested && !this.touchOwned && !this.touchPending) this.setTouchOwnership(true);
         }
@@ -390,11 +399,12 @@ export class BrowserSession {
     this.decoder = null;
   }
 
-  close(message = 'Disconnected. Click Connect to request approval again.', error = false) {
+  close(message = 'Disconnected. Click Connect to request approval again.', error = false, closeCode = null) {
     if (this.closed) return;
     // Closing the WebSocket also releases all contacts server-side, including if a
     // final empty contact message cannot get through a failing connection.
     this.closed = true;
+    this.diagnostics.mark('closed', closeCode);
     this.authenticated = false;
     this.approvalPending = false;
     this.clearTimer(this.timeout);

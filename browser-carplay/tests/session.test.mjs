@@ -18,7 +18,7 @@ function packet(type = 1) {
 }
 
 function harness() {
-  const sockets = [], decoders = [], states = [], frames = [], timers = new Map();
+  const sockets = [], decoders = [], states = [], frames = [], diagnostics = [], timers = new Map();
   let now = 0, timerId = 0;
   class FakeSocket {
     constructor(url) { this.url = url; this.readyState = 0; this.bufferedAmount = 0; this.sent = []; sockets.push(this); }
@@ -41,10 +41,11 @@ function harness() {
     WebSocket: FakeSocket, VideoDecoder: FakeDecoder,
     EncodedVideoChunk: class { constructor(value) { Object.assign(this, value); } },
     onState: (state, message) => states.push({ state, message }), onFrame: frame => frames.push(frame),
+    onDiagnostics: snapshot => diagnostics.push(snapshot),
     now: () => now, setTimer: (callback, delay) => { timers.set(++timerId, { callback, delay }); return timerId; },
     clearTimer: id => timers.delete(id),
   });
-  return { session, sockets, decoders, states, frames, timers, FakeDecoder,
+  return { session, sockets, decoders, states, frames, diagnostics, timers, FakeDecoder,
     advance: ms => { now += ms; },
     connect() { session.connect('192.168.1.20', '8765'); sockets.at(-1).open(); return sockets.at(-1); },
     async ready() { const socket = this.connect(); approve(socket); socket.receive(CONFIG); await Promise.resolve(); return socket; },
@@ -666,4 +667,86 @@ test('audio is approval-gated and independent of video recovery on the same sock
   h.session.close();
   assert.equal(resets, 1);
   assert.equal(h.session.setAudioEnabled(true, 1), false);
+});
+
+test('diagnostic milestones measure only the current approved attempt and never repeat per frame', async () => {
+  const h = harness();
+  assert.equal(h.diagnostics.length, 0);
+  h.session.connect('192.168.1.20', '8765');
+  h.advance(250);
+  const socket = h.sockets[0];
+  socket.open();
+  h.advance(100);
+  socket.receive({ type: 'approvalPending', version: 2 });
+  h.advance(2000);
+  socket.receive({ type: 'authenticated', version: 2 });
+  socket.receive(CONFIG);
+  await Promise.resolve();
+  h.advance(500);
+  for (let i = 0; i < 1000; i++) h.decoders[0].emit();
+  // Recovery within the same approved session must not add another first video.
+  socket.receive({ ...CONFIG, streamId: 2 });
+  await Promise.resolve();
+  h.decoders.at(-1).emit();
+  h.advance(150);
+  socket.end(1006, 'MUST NOT BE DISPLAYED token=private sdp=private');
+  assert.deepEqual(h.diagnostics.at(-1), {
+    attempt: 1, transport: 'ws:', events: [
+      { stage: 'connect', elapsedMs: 0 },
+      { stage: 'wsOpen', elapsedMs: 250 },
+      { stage: 'approvalPending', elapsedMs: 350 },
+      { stage: 'approved', elapsedMs: 2350 },
+      { stage: 'firstVideo', elapsedMs: 2850 },
+      { stage: 'closed', elapsedMs: 3000, closeCode: 1006 },
+    ],
+  });
+  assert.equal(h.diagnostics.length, 6, 'only bounded milestone updates, never frames or controls');
+  assert.doesNotMatch(JSON.stringify(h.diagnostics), /MUST NOT BE DISPLAYED|private|192\.168|8765|avc1/);
+  h.connect();
+  assert.deepEqual(h.diagnostics.at(-1), { attempt: 2, transport: 'ws:', events: [
+    { stage: 'connect', elapsedMs: 0 }, { stage: 'wsOpen', elapsedMs: 0 },
+  ] });
+  h.session.close();
+});
+
+test('diagnostics distinguish constructor failure, pre-open close, timeout, and observed close codes', () => {
+  const blocked = harness();
+  blocked.session.WebSocket = class { constructor() { throw new Error('secret error'); } };
+  blocked.session.connect('192.168.1.20', '8765');
+  assert.deepEqual(blocked.diagnostics.at(-1).events, [
+    { stage: 'connect', elapsedMs: 0 }, { stage: 'closed', elapsedMs: 0, closeCode: null },
+  ]);
+  assert.equal(blocked.timers.size, 0);
+
+  const h = harness();
+  h.session.connect('192.168.1.20', '8765');
+  const old = h.sockets[0];
+  const staleClose = old.onclose;
+  h.advance(1234);
+  old.end(1006);
+  assert.deepEqual(h.diagnostics.at(-1).events, [
+    { stage: 'connect', elapsedMs: 0 }, { stage: 'closed', elapsedMs: 1234, closeCode: 1006 },
+  ]);
+  h.session.connect('192.168.1.20', '8765');
+  staleClose({ code: 1008, reason: 'MUST NOT BE DISPLAYED' });
+  assert.equal(h.diagnostics.at(-1).events.length, 1, 'old callbacks cannot mark the new attempt');
+  h.advance(60000);
+  [...h.timers.values()][0].callback();
+  assert.deepEqual(h.diagnostics.at(-1).events.at(-1), { stage: 'closed', elapsedMs: 60000, closeCode: null });
+  h.session.close();
+  assert.equal(h.diagnostics.at(-1).events.length, 2, 'repeated close is idempotent');
+  assert.doesNotMatch(JSON.stringify([blocked.diagnostics, h.diagnostics]), /secret|MUST NOT BE DISPLAYED/);
+});
+
+test('diagnostics cannot turn approval rejection into success or invent a received close code', () => {
+  const h = harness();
+  const socket = h.connect();
+  socket.receive({ type: 'approvalPending', version: 2 });
+  h.advance(800);
+  socket.receive({ type: 'error', code: 'approvalRejected', version: 2, token: 'secret' });
+  assert.deepEqual(h.diagnostics.at(-1).events.map(event => event.stage), ['connect', 'wsOpen', 'approvalPending', 'closed']);
+  assert.equal(h.diagnostics.at(-1).events.at(-1).closeCode, null, 'viewer-initiated close code is not a received CloseEvent');
+  assert.equal(h.session.authenticated, false);
+  assert.equal(h.sockets.length, 1);
+  assert.doesNotMatch(JSON.stringify(h.diagnostics), /secret/);
 });

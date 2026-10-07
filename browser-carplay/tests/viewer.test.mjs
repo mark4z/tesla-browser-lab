@@ -14,24 +14,27 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
     constructor() {
       super(); this.value = ''; this.disabled = false; this.checked = false; this.hidden = false; this.textContent = '';
       this.dataset = {}; this.width = 1280; this.height = 720;
+      this.children = [];
       this.bounds = { left: 0, top: 0, width: 1000, height: 1000 };
       this.classes = new Set();
       this.classList = { remove: name => this.classes.delete(name),
         toggle: (name, enabled) => enabled ? this.classes.add(name) : this.classes.delete(name) };
     }
     getContext() { return { clearRect() {}, fillRect() {}, drawImage: (...args) => draws.push(args) }; }
+    replaceChildren(...children) { this.children = children; }
     getBoundingClientRect() { return this.bounds; }
     setPointerCapture(id) { captured.add(id); }
     hasPointerCapture(id) { return captured.has(id); }
     releasePointerCapture(id) { captured.delete(id); this.dispatch('lostpointercapture', { pointerId: id }); }
   }
   const elements = Object.fromEntries(['connection', 'ip', 'port', 'parked', 'touch', 'connect', 'disconnect',
-    'video', 'viewport', 'placeholder', 'status', 'indicator', 'origin', 'touch-status', 'audio', 'audio-status'].map(id => [id, new Element()]));
+    'video', 'viewport', 'placeholder', 'status', 'indicator', 'origin', 'touch-status', 'audio', 'audio-status',
+    'connection-timeline', 'connection-attempt', 'connection-transport'].map(id => [id, new Element()]));
   elements.parked.checked = true;
   elements.touch.checked = true;
-  const document = Object.assign(new Events(), { visibilityState: 'visible', getElementById: id => elements[id] });
+  const document = Object.assign(new Events(), { visibilityState: 'visible', getElementById: id => elements[id], createElement: () => new Element() });
   const sockets = [], decoders = [], raf = new Map();
-  let rafId = 0;
+  let rafId = 0, fetches = 0;
   class Socket {
     constructor() { this.readyState = 0; this.bufferedAmount = 0; this.sent = []; sockets.push(this); }
     open() { this.readyState = 1; this.onopen?.(); }
@@ -65,6 +68,7 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
   Object.assign(globalThis, { document, window, location: { protocol: 'https:', origin: 'https://viewer.example' }, isSecureContext: true,
     VideoDecoder: Decoder, EncodedVideoChunk: window.EncodedVideoChunk, WebSocket: Socket, ResizeObserver: window.ResizeObserver,
     devicePixelRatio: 1, AudioContext, AudioWorkletNode,
+    fetch: () => { fetches++; throw new Error('The viewer must not fetch an HTTP health probe.'); },
     requestAnimationFrame: callback => { raf.set(++rafId, callback); return rafId; }, cancelAnimationFrame: id => raf.delete(id) });
   Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userAgent: 'Chrome/154.0.0.0' } });
   const paint = () => { const callbacks = [...raf.values()]; raf.clear(); callbacks.forEach(callback => callback()); };
@@ -79,6 +83,8 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
   assert.equal(elements.touch.checked, false);
   assert.equal(elements.connect.disabled, true);
   assert.equal(elements.origin.textContent, 'https://viewer.example');
+  assert.match(elements['connection-transport'].textContent, /Page: HTTPS\. Secure context: yes.*not attempted/);
+  assert.equal(elements['connection-timeline'].children.length, 0);
   elements.connection.dispatch('submit');
   assert.equal(sockets.length, 0);
 
@@ -88,6 +94,7 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
   elements.port.value = '8765';
   elements.connection.dispatch('submit');
   assert.equal(sockets.length, 0, 'full endpoints cannot be supplied as the IP');
+  assert.equal(elements['connection-timeline'].children.length, 0, 'invalid input is not a network attempt');
   assert.match(elements.status.textContent, /only the private IPv4/);
   elements.ip.value = '192.168.1.20';
   elements.port.value = '8765';
@@ -95,6 +102,9 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
   elements.connection.dispatch('submit');
   assert.equal(sockets.length, 1, 'repeated submit cannot duplicate connection');
   assert.equal(elements.ip.disabled, true);
+  assert.match(elements['connection-attempt'].textContent, /Attempt 1/);
+  assert.match(elements['connection-transport'].textContent, /ws:\/\/ \(plaintext LAN WebSocket\)/);
+  assert.doesNotMatch(elements['connection-transport'].textContent, /192\.168/);
   const socket = sockets[0];
   socket.open();
   assert.deepEqual(socket.sent, [{ type: 'requestApproval', version: 2 }]);
@@ -112,6 +122,8 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
   assert.equal(rendered.closes, 1);
   assert.equal(draws.length, 1);
   assert.equal(elements.placeholder.hidden, true);
+  assert.deepEqual(elements['connection-timeline'].children.map(item => item.textContent.replace(/^\+\d+\.\ds · /, '')),
+    ['Connect requested', 'WebSocket opened', 'Android approval pending', 'Approved on Android', 'First video decoded']);
   assert.equal(elements.touch.checked, false);
   elements.video.dispatch('pointerdown', pointer(100));
   assert.equal(socket.sent.some(m => m.type === 'touch'), false, 'video must not implicitly enable touch');
@@ -230,6 +242,9 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
   elements.disconnect.dispatch('click');
   elements.disconnect.dispatch('click');
   assert.equal(sockets[1].readyState, 3);
+  assert.match(elements['connection-attempt'].textContent, /Attempt 2/);
+  assert.equal(elements['connection-timeline'].children.length, 4, 'reconnect replaces the earlier timeline');
+  assert.match(elements['connection-timeline'].children.at(-1).textContent, /Connection ended \(no close event code observed\)/);
   assert.equal(elements.touch.disabled, true);
   assert.equal(sockets.length, 2, 'cancelling pending approval must never reconnect');
 
@@ -246,4 +261,5 @@ test('viewer requires explicit connection/touch and releases frames/contacts on 
   assert.equal(elements.touch.checked, false);
   assert.equal(elements.touch.disabled, true);
   assert.equal(sockets.length, 3);
+  assert.equal(fetches, 0, 'HTTPS viewer never automatically requests the HTTP health endpoint');
 });

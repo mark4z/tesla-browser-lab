@@ -1,6 +1,7 @@
 import { Contacts, fitRect, mapPointer } from './core.mjs?v=browser-av-v3';
-import { BrowserSession } from './session.mjs?v=browser-av-v3';
+import { BrowserSession } from './session.mjs?v=connection-diag-v1';
 import { BrowserAudioPlayer } from './audio.mjs?v=browser-av-v3';
+import { milestoneText, transportCaption } from './diagnostics.mjs?v=connection-diag-v1';
 
 const byId = id => document.getElementById(id);
 const form = byId('connection');
@@ -18,6 +19,9 @@ const viewport = byId('viewport');
 const placeholder = byId('placeholder');
 const status = byId('status');
 const indicator = byId('indicator');
+const connectionTimeline = byId('connection-timeline');
+const connectionAttempt = byId('connection-attempt');
+const connectionTransport = byId('connection-transport');
 const context = canvas.getContext('2d', { alpha: false, desynchronized: true });
 const contacts = new Contacts();
 let pendingFrame = null;
@@ -45,8 +49,21 @@ function compatibilityError() {
 }
 
 const blocked = compatibilityError();
+function showDiagnostics({ attempt, transport, events }) {
+  connectionTransport.textContent = transportCaption({ protocol: location.protocol, secureContext: isSecureContext, transport });
+  connectionAttempt.textContent = attempt ? `Attempt ${attempt}. Times are since Connect; latest attempt only.` : 'No connection attempted.';
+  // Fixed stage labels and numeric times/codes only. Never render network text.
+  const items = events.map(event => {
+    const item = document.createElement('li');
+    item.textContent = milestoneText(event);
+    return item;
+  });
+  connectionTimeline.replaceChildren(...items);
+}
+showDiagnostics({ attempt: 0, transport: null, events: [] });
 const session = new BrowserSession({ WebSocket, VideoDecoder: window.VideoDecoder,
   EncodedVideoChunk: window.EncodedVideoChunk, onState: setState, onFrame: queueFrame, onTouchOwnership: setTouchState,
+  onDiagnostics: showDiagnostics,
   onAudioMessage: message => audioPlayer?.handleMessage(message),
   onAudioPacket: packet => audioPlayer?.handlePacket(packet),
   onAudioReset: () => audioPlayer?.reset() });
@@ -243,4 +260,3 @@ else window.addEventListener('resize', releaseContacts);
 status.textContent = blocked || 'Ready. Confirm you are parked, then enter the bridge IP and port to request Android approval.';
 indicator.dataset.state = blocked ? 'error' : 'closed';
 updateControls();
-

@@ -55,3 +55,13 @@ footer { border-top: 1px solid #25344a; padding: 20px 0 0; margin-top: 12px; }
 
 .audio-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 2px 0 14px; }
 #audio-status { font-size: 12px; color: #a6b7cd; flex: 1 1 220px; }
+
+.connection-diagnostics { padding: 20px 24px; margin: 18px 0 8px; border: 1px solid #30445e; border-radius: 13px; background: #101b29; }
+.connection-diagnostics h2 { margin-bottom: 8px; }
+.connection-diagnostics p { margin: 8px 0; font-size: 13px; overflow-wrap: anywhere; }
+#connection-transport { color: #d2e5ff; }
+#connection-attempt, .connection-diagnostics .diagnostic-privacy { color: #9fb0c6; }
+#connection-timeline { font-size: 14px; font-variant-numeric: tabular-nums; }
+#connection-timeline:empty { display: none; }
+#connection-timeline li { margin: 4px 0; color: #d2e5ff; }
+.connection-diagnostics details { padding: 8px 0 0; }

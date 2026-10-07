@@ -6,8 +6,8 @@
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self' ws:; worker-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
   <title>DiPlay · Browser CarPlay preview</title>
-  <link rel="stylesheet" href="viewer.css">
-  <script type="module" src="viewer.mjs?v=browser-av-v3"></script>
+  <link rel="stylesheet" href="viewer.css?v=connection-diag-v1">
+  <script type="module" src="viewer.mjs?v=connection-diag-v1"></script>
 </head>
 <body>
 <main>
@@ -44,6 +44,19 @@
       </div>
     </form>
   </section>
+  <section class="connection-diagnostics" aria-labelledby="diagnostics-title">
+    <h2 id="diagnostics-title">Connection diagnostics</h2>
+    <p id="connection-transport">Checking page security and connection transport…</p>
+    <p id="connection-attempt">No connection attempted.</p>
+    <ol id="connection-timeline" aria-label="Latest connection attempt milestones" aria-live="polite" aria-relevant="additions text"></ol>
+    <p class="diagnostic-help">The last reached stage helps locate a failure. WebSocket open means the browser handshake succeeded; Android approval and video are separate steps. Code 1006 means no normal close frame was received and does not identify the cause.</p>
+    <details>
+      <summary>Check LAN reachability separately</summary>
+      <p>While parked, manually enter the HTTP health URL shown in DiPlay in the browser address bar, for example http://192.168.1.20:8765/health. A response identifying the DiPlay browser service proves that this browser can reach that APK’s health endpoint over the LAN. It does not prove the HTTPS viewer has local-network permission, that its WebSocket handshake is allowed, or that Android approved a session.</p>
+      <p>This HTTPS page never fetches the HTTP health endpoint, because that request can be blocked as mixed content. Navigating away disconnects an active session. Return to this HTTPS viewer and click Connect for a new attempt. Do not bypass browser or certificate warnings.</p>
+    </details>
+    <p class="diagnostic-privacy">Only this attempt’s stage times and numeric close code are kept in memory. No payloads, credentials, audio, or video are logged or stored.</p>
+  </section>
   <section class="display" aria-label="CarPlay display">
     <div class="display-toolbar">
       <div><span id="indicator" aria-hidden="true"></span><p id="status" role="status" aria-live="polite">Checking this browser…</p></div>
@@ -74,4 +87,3 @@
 </main>
 </body>
 </html>
-
