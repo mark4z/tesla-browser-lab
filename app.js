@@ -1,13 +1,53 @@
 'use strict';
 const $=id=>document.getElementById(id), v=$('video');
 const browserMatch=navigator.userAgent.match(/(?:Chrome|Chromium|Firefox|Version)\/(\d+)/);
-const env={secure:window.isSecureContext,webcodecs:typeof VideoDecoder!=='undefined',browser:browserMatch?browserMatch[0]:'未识别',viewport:innerWidth+'×'+innerHeight,dpr:devicePixelRatio,maxTouchPoints:navigator.maxTouchPoints||0};
+const REPORT_VERSION='v1.2 SCREEN';
+const env={secure:window.isSecureContext,webcodecs:typeof VideoDecoder!=='undefined',browser:browserMatch?browserMatch[0]:'未识别',viewport:null,dpr:null,maxTouchPoints:navigator.maxTouchPoints||0};
 let records={},running=false,stopped=false,cancelActive=null,hiddenDuring=false;
 let touch={events:0,max:0,type:'未测试'},points=new Map();
 $('secure').textContent=env.secure?'是 / HTTPS':'否';$('webcodecs').textContent=env.webcodecs?'可调用':'不可用';$('viewport').textContent=env.viewport;$('browser').textContent=env.browser;
 $('parked').onchange=()=>{$('start').disabled=!$('parked').checked||running;if(running&&!$('parked').checked)stop();};
 function errorName(e){return e&&e.name?e.name:'Error';}
-function report(){const lines=['车载浏览器能力测试 v1.1 AUDIO',new Date().toISOString(),'secure='+env.secure+'; VideoDecoder='+env.webcodecs,'browser='+env.browser+'; viewport='+env.viewport+'; dpr='+env.dpr+'; maxTouchPoints='+env.maxTouchPoints,'sample=synthetic 1280x720 60fps 6s silent; WebCodecs first 120 frames','status='+(running?'running':stopped?'stopped':'idle/completed')+'; hiddenDuring='+hiddenDuring];for(const k of ['h264','hevc']){lines.push(k+': '+(records[k]?JSON.stringify(records[k]):'not tested'));}if(window.audioReport)lines.push('audio='+JSON.stringify(window.audioReport()));lines.push('touch='+JSON.stringify(touch),'No full UA, VIN, location, account or address.','No hardware verification, network roundtrip or phone control measured.');$('report').value=lines.join('\n');return $('report').value;}
+// Browser measurements only: CSS × DPR is an estimate, not native panel resolution.
+function finiteNumber(value){return typeof value==='number'&&Number.isFinite(value)?value:null;}
+function dimension(value){const n=finiteNumber(value);return n!==null&&n>=0?n:null;}
+function positive(value){const n=finiteNumber(value);return n!==null&&n>0?n:null;}
+function estimatedPixels(value,dpr){return value===null||dpr===null?null:finiteNumber(Math.round(value*dpr));}
+function sampleGeometry(reason){
+  const s=window.screen||{},root=document.documentElement||{},vv=window.visualViewport;
+  const dpr=positive(window.devicePixelRatio),orientation=s.orientation;
+  const screenCss={width:dimension(s.width),height:dimension(s.height),availWidth:dimension(s.availWidth),availHeight:dimension(s.availHeight)};
+  const viewportCss={innerWidth:dimension(window.innerWidth),innerHeight:dimension(window.innerHeight),clientWidth:dimension(root.clientWidth),clientHeight:dimension(root.clientHeight)};
+  const fullscreenSupported='fullscreenElement' in document||'webkitFullscreenElement' in document;
+  return {version:REPORT_VERSION,sampledAt:new Date().toISOString(),reason,screenCss,viewportCss,dpr,
+    visualViewport:vv?{width:dimension(vv.width),height:dimension(vv.height),scale:positive(vv.scale),offsetLeft:finiteNumber(vv.offsetLeft),offsetTop:finiteNumber(vv.offsetTop),pageLeft:finiteNumber(vv.pageLeft),pageTop:finiteNumber(vv.pageTop)}:null,
+    fullscreen:{supported:fullscreenSupported,active:fullscreenSupported?!!(document.fullscreenElement||document.webkitFullscreenElement):null},
+    orientation:orientation?{type:typeof orientation.type==='string'?orientation.type:null,angle:finiteNumber(orientation.angle)}:null,
+    estimatedDevicePixels:{method:'CSS × DPR, rounded; not verified native panel resolution',screen:{width:estimatedPixels(screenCss.width,dpr),height:estimatedPixels(screenCss.height,dpr)},viewport:{width:estimatedPixels(viewportCss.innerWidth,dpr),height:estimatedPixels(viewportCss.innerHeight,dpr)}},
+    limitations:'Browser-reported geometry cannot establish native LCD resolution, physical size in millimeters, CarPlay source resolution, or the cause of large icons.'};
+}
+function geometryValue(value){return value===null?'不可用':String(typeof value==='number'?+value.toFixed(3):value);}
+function geometryPair(width,height){return geometryValue(width)+' × '+geometryValue(height);}
+function refreshGeometry(reason){
+  const g=sampleGeometry(reason),s=g.screenCss,p=g.viewportCss,vv=g.visualViewport,e=g.estimatedDevicePixels;
+  env.viewport=geometryPair(p.innerWidth,p.innerHeight);env.dpr=g.dpr;
+  $('viewport').textContent=env.viewport;
+  const values={screenCss:geometryPair(s.width,s.height),screenAvailable:geometryPair(s.availWidth,s.availHeight),viewportInner:env.viewport,viewportClient:geometryPair(p.clientWidth,p.clientHeight),screenDpr:geometryValue(g.dpr),visualSize:vv?geometryPair(vv.width,vv.height):'不可用',visualScale:vv?geometryValue(vv.scale):'不可用',visualOffsets:vv?geometryPair(vv.offsetLeft,vv.offsetTop):'不可用',estimatedScreen:geometryPair(e.screen.width,e.screen.height),estimatedViewport:geometryPair(e.viewport.width,e.viewport.height),screenFullscreen:g.fullscreen.active===null?'不可用':g.fullscreen.active?'是':'否',screenOrientation:g.orientation?(g.orientation.type||'不可用')+' / '+geometryValue(g.orientation.angle)+'°':'不可用',screenSample:g.version+' · '+g.sampledAt};
+  for(const id of Object.keys(values)){const element=$(id);if(element)element.textContent=values[id];}
+  return g;
+}
+function updateGeometry(){refreshGeometry('event');}
+window.addEventListener('resize',updateGeometry);
+window.addEventListener('load',updateGeometry);
+window.addEventListener('orientationchange',updateGeometry);
+document.addEventListener('fullscreenchange',updateGeometry);
+document.addEventListener('webkitfullscreenchange',updateGeometry);
+if(window.visualViewport&&typeof window.visualViewport.addEventListener==='function'){
+  window.visualViewport.addEventListener('resize',updateGeometry);
+  window.visualViewport.addEventListener('scroll',updateGeometry);
+}
+if(window.screen&&window.screen.orientation&&typeof window.screen.orientation.addEventListener==='function')window.screen.orientation.addEventListener('change',updateGeometry);
+function report(){const geometry=refreshGeometry('report');const lines=['车载浏览器能力测试 '+REPORT_VERSION,new Date().toISOString(),'secure='+env.secure+'; VideoDecoder='+env.webcodecs,'browser='+env.browser+'; viewport='+env.viewport+'; dpr='+env.dpr+'; maxTouchPoints='+env.maxTouchPoints,'geometry='+JSON.stringify(geometry),'sample=synthetic 1280x720 60fps 6s silent; WebCodecs first 120 frames','status='+(running?'running':stopped?'stopped':'idle/completed')+'; hiddenDuring='+hiddenDuring];for(const k of ['h264','hevc']){lines.push(k+': '+(records[k]?JSON.stringify(records[k]):'not tested'));}if(window.audioReport)lines.push('audio='+JSON.stringify(window.audioReport()));lines.push('touch='+JSON.stringify(touch),'No full UA, VIN, location, account or address.','No hardware verification, network roundtrip or phone control measured.');$('report').value=lines.join('\n');return $('report').value;}
 function render(){const names={h264:'H.264',hevc:'HEVC / H.265'};$('results').textContent='';for(const k of ['h264','hevc']){const a=document.createElement('article'),h=document.createElement('h3'),p=document.createElement('p');h.textContent=names[k];const r=records[k];p.textContent=r?['播放器声明：'+(r.mediaClaim||'未测'),'WebCodecs 声明：'+(r.wcClaim||'未测'),'实际解码：'+(r.decodeText||'未测'),'实际播放：'+(r.playText||'未测')].join('\n'):'尚未测试';a.append(h,p);$('results').append(a);}report();}
 async function asset(path,json){const c=new AbortController(),t=setTimeout(()=>c.abort(),15000);try{const r=await fetch(path,{signal:c.signal});if(!r.ok)throw new Error('sample load failed');return await (json?r.json():r.arrayBuffer());}finally{clearTimeout(t);}}
 function config(m){return {codec:m.codec,codedWidth:m.codedWidth,codedHeight:m.codedHeight,description:Uint8Array.from(atob(m.description),x=>x.charCodeAt(0)),hardwareAcceleration:'no-preference'};}
@@ -23,3 +63,4 @@ if(window.PointerEvent){for(const type of ['pointerdown','pointermove','pointeru
 $('resetTouch').onclick=()=>{touch={events:0,max:0,type:'未测试'};points.clear();draw();};
 $('copy').onclick=async()=>{const t=report();try{if(navigator.clipboard&&window.isSecureContext)await navigator.clipboard.writeText(t);else{$('report').focus();$('report').select();if(!document.execCommand('copy'))throw new Error();}$('exportStatus').textContent='已复制，可以粘贴发回。';}catch(_){$('report').focus();$('report').select();$('exportStatus').textContent='浏览器未允许自动复制，请在文本框里长按并手动复制。';}};
 $('download').onclick=()=>{const u=URL.createObjectURL(new Blob([report()],{type:'text/plain;charset=utf-8'})),a=document.createElement('a');a.href=u;a.download='browser-capability-result.txt';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),1000);$('exportStatus').textContent='已尝试下载；若车载浏览器不支持下载，请复制结果。';};report();
+
