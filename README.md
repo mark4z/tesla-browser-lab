@@ -18,3 +18,9 @@ The root page measures screen and available area (CSS pixels), inner/client view
 CSS × DPR estimates are rounded and are **not verified native LCD resolution**. The page cannot measure millimeters, CarPlay source resolution, or diagnose the cause of large icons. Unavailable or non-finite values are reported as null (unavailable in the UI). Existing media and touch tests are unchanged.
 
 Run geometry tests with `node --test tests/screen.test.cjs` (Node 18+).
+
+## Manual fullscreen test (v1.3 FULLSCREEN)
+
+Parked confirmation gates manual entry. The click calls the standard or WebKit request API synchronously. Actual fullscreen element state confirms entry/exit; a resolved Promise alone does not. Error events, rejected Promises, external exits, pending duplicate clicks and a 5-second unconfirmed result are handled. Exit remains possible after unchecking parked confirmation. Geometry is sampled before each request and 300 ms after state/viewport changes; this is a best-effort settled snapshot, not a guarantee of native panel dimensions. TXT includes capabilities, last 20 attempts, and last 40 events. No automatic fullscreen entry, driving restriction bypass, media test, or permission prompt is added.
+
+Run `node --test tests/*.test.cjs`.
